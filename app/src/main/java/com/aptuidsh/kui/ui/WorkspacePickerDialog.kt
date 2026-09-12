@@ -48,6 +48,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import com.aptuidsh.kui.AppRuntime
+import com.aptuidsh.kui.env.ProrootEnv
 import com.aptuidsh.kui.R
 import com.aptuidsh.kui.net.DshClient
 import org.json.JSONObject
@@ -172,7 +173,17 @@ fun WorkspacePickerDialog(
                 }
 
                 override fun onError(code: Int, message: String?, details: JSONObject?) {
-                    error = message ?: "加载失败"
+                    // 目录列举失败时的兜底：不让用户卡在"无法创建工作区 → 无法建会话"的死循环里。
+                    // 直接把当前路径置为默认工作区，用户照常点「打开」即可创建成功
+                    // （workspace/create 与 directoryPicker/list 是两条独立链路，
+                    //   实测前者在后者失败时依然可用）。
+                    val fallback = ProrootEnv.defaultWorkspaceGuestPath(context)
+                    val reason = message ?: "加载失败"
+                    error = "$reason\n\n目录列举暂不可用，已回退到默认工作区：\n$fallback\n可直接点「打开」创建。"
+                    currentPath = fallback
+                    homePath = fallback.substringBeforeLast('/').ifEmpty { "/" }
+                    crumbs = emptyList()
+                    entries = emptyList()
                     loading = false
                 }
             }

@@ -321,6 +321,26 @@ public final class ProrootEnv {
         return out;
     }
 
+    // ------------------------------------------------------------------ 默认工作区
+
+    /**
+     * 返回默认工作区在 guest 内的路径。
+     *
+     * <p>优先用手机共享存储（用户能在文件管理器里看到）：宿主侧 {@code /storage/emulated/0/APTUIDSH}
+     * 与 guest 侧 {@code /sdcard/APTUIDSH} 是同一目录（通过 {@code -b} 绑定）。
+     * 若手机存储不可写（未授予「所有文件访问」等），回退到 guest 内部的 {@code /root/workspace}。
+     */
+    public static String defaultWorkspaceGuestPath(Context ctx) {
+        try {
+            File shared = new File(HOST_SDCARD, "APTUIDSH");
+            if (shared.isDirectory() || shared.mkdirs()) {
+                return GUEST_WORKSPACE;
+            }
+        } catch (Throwable ignored) {
+        }
+        return GUEST_HOME + "/workspace";
+    }
+
     // ------------------------------------------------------------------ 崩溃报告
 
     /** 崩溃报告文件（由 AptuidshApp 的全局未捕获异常处理器写入，用户可直接取）。 */

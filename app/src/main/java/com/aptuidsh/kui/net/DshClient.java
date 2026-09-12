@@ -72,6 +72,14 @@ public class DshClient {
     private static final android.os.Handler MAIN =
             new android.os.Handler(android.os.Looper.getMainLooper());
 
+    /** 明细日志开关（默认开；排障期需要，稳定后可关）。 */
+    private static final boolean VERBOSE = true;
+
+    private static String truncate(String s) {
+        if (s == null) return "null";
+        return s.length() > 400 ? s.substring(0, 400) + "…" : s;
+    }
+
     private static void deliver(Runnable r) {
         if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
             r.run();
@@ -1063,6 +1071,12 @@ public class DshClient {
             return syntheticHostDescribe();
         }
         JSONObject newPayload = ApiCompat.buildArgs(path, payload);
+        // 明细日志：真机排障时，能直接看到"本地方法名 → 实际发出的方法 + 参数"，
+        // 以及服务端原样返回的错误码/消息。
+        if (VERBOSE) {
+            com.aptuidsh.kui.env.EnvLog.i("RPC → " + path + " → " + mapped
+                    + " args=" + truncate(newPayload.toString()));
+        }
 
         JSONObject envelope = postApi(mapped, newPayload, true);
         if (envelope == null && com.aptuidsh.kui.env.DshAuth.reauth()) {
@@ -1072,6 +1086,15 @@ public class DshClient {
         if (envelope == null) {
             throw new JsonHttpException(401, "unauthorized",
                     "内置 dsh 鉴权失败：请在环境控制页重启后端");
+        }
+        if (VERBOSE) {
+            if (envelope.optBoolean("ok", false)) {
+                com.aptuidsh.kui.env.EnvLog.i("RPC ← " + mapped + " ok "
+                        + truncate(String.valueOf(envelope.opt("value"))));
+            } else {
+                com.aptuidsh.kui.env.EnvLog.e("RPC ← " + mapped + " 失败 "
+                        + truncate(String.valueOf(envelope.optJSONObject("error"))), null);
+            }
         }
         JSONObject value = envelope.optJSONObject("value");
         if (value != null && envelope.optBoolean("ok", false)) {
