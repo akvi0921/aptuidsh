@@ -22,35 +22,41 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * DSH 后端双事件通道客户端（devcrew 契约 2）。
+ * DSH 0.1.5 事件流传输层：单一 WebSocket 多路复用。
  *
- * <p><b>重要（依据 docs/protocol-notes.md §3 实测）</b>：{@code /api/events.host} 与
- * {@code /api/events.mux} <b>不是 SSE</b>——普通 HTTP GET 返回 426 upgrade required，
- * 两通道均为 <b>WebSocket downlink</b>（只下发、不接收客户端数据帧）。因此本类实现
- * 极简 WebSocket 客户端：HTTP Upgrade 握手（Sec-WebSocket-Key/Accept 校验）+ RFC 6455
- * 帧解析（文本帧、分片、ping/pong、close），零第三方依赖（仅 JDK + android.jar org.json）。
+ * <p><b>协议背景</b>：
+ * 0.1.1 的双通道 {@code /api/events.host} + {@code /api/events.mux} 在 0.1.5 已返回 404，
+ * 统一替换为 {@code ws://127.0.0.1:3081/api/remote.mux}。所有下行情报（全局事件、会话跟随、
+ * 控制帧）均经该单一连接以 {@code streamId} 多路复用。
  *
- * <p>两条通道各由一个独立守护线程驱动，永不阻塞主线程；断线后指数退避自动重连
- * （3s 起、每次翻倍、上限 30s，握手成功即重置）。
+ * <p>客户端 → 服务端（文本帧）：
+ * <ul>
+ *   <li>{@code {"type":"open","streamId":"<id>","endpoint":"<name>","payload":{"args":{…}}}}</li>
+ *   <li>{@code {"type":"cancel","streamId":"<id>"}}</li>
+ * </ul>
  *
- * <p>帧信封：{@code {"type":"server-request","rpcId":"<uuid>","method":"<payload.type>","payload":{...}}}，
- * 事件类型 = {@code payload.type}。mux 通道的 {@code session/event} 帧内
- * {@code assistant/chunk}（{@code chunk.type="text-delta"}）为流式正文增量 → 触发
- * {@link DshEventListener#onTextDelta}；{@code assistant/message}（最终消息）与
- * {@code turn/end}（reason=aborted/error 且未发消息时）→ 触发
- * {@link DshEventListener#onStreamEnd}。全部帧同时按通道原样分发到
- * {@code onMuxEvent}/{@code onHostEvent}，供 UI 订阅 projection/jobs/approval 等原始帧。
+ * <p>服务端 → 客户端（文本帧）：
+ * <ul>
+ *   <li>{@code {"type":"item","streamId":"<id>","value":…}}</li>
+ *   <li>{@code {"type":"end","streamId":"<id>"}}</li>
+ *   <li>{@code {"type":"error","streamId":"<id>","error":{…}}}</li>
+ * </ul>
  *
- * <p><b>host 通道的目录失效信号</b>：Host 会经 events.host 转发
- * {@code {type:"host/remote-event", event:"llm/adapters-updated"|"settings/document-updated", args:[...]}}
- * 帧（官方 client 端 {@code ctx.remote.$on} 的同一批事件，见 dsh-host-apiproxy 的
- * API_REMOTE_FORWARDED_EVENTS 转发循环）。这两条帧在分发前统一交给
- * {@link ModelCatalogSignals} 记录版本号，与是否有 UI 监听器无关。
+ * <p><b>本类职责</b>：在 {@link DshEventListener} 公开 API 不变的前提下，把新协议 item 翻译回
+ * UI 已有的旧信封格式（{@code server-request}），使 {@code ChatActivity / HomeViewModel} 等
+ * 消费方无需修改。
+ *
+ * <p>通道映射（旧 → 新）：
+ * <ul>
+ *   <li>{@link #CH_HOST} → {@code $events} 流：全局 Cordis 事件（目录失效信号等）。</li>
+ *   <li>{@link #CH_MUX} → 实际承载所有下行情报的 WebSocket 连接本身。</li>
+ *   <li>按需 {@code session/follow}（会话实时流）与 {@code session/control}（队列/任务/投影）。</li>
+ * </ul>
  *
  * <p>线程模型：所有回调在通道工作线程（daemon）上执行，调用方自行决定是否切回 UI 线程；
  * 本类绝不触碰主线程。
@@ -59,16 +65,16 @@ public class EventStream {
 
     /** 事件监听器（契约 2）：帧分发 + 流式回调。 */
     public interface DshEventListener {
-        /** events.host 通道的一帧（envelope 原样），按 payload.type 分发（host/session-status 等）。 */
+        /** host 通道等价帧（envelope 原样），按 payload.type 分发（host/session-status 等）。 */
         void onHostEvent(JSONObject envelope);
 
-        /** events.mux 通道的一帧（envelope 原样），按 payload.type 分发（session/event、projection、jobs 等）。 */
+        /** mux 通道等价帧（envelope 原样），按 payload.type 分发（session/event、projection、jobs 等）。 */
         void onMuxEvent(JSONObject envelope);
 
-        /** 流式正文增量：session/event 内 assistant/chunk 且 chunk.type=text-delta。meta 含 seq/turn/step/index。 */
+        /** 流式正文增量：assistant-stream chunk.type=text-delta。meta 含 seq/turn/step/index。 */
         void onTextDelta(String sessionId, String delta, JSONObject meta);
 
-        /** 流结束：assistant/message（正常/中断含内容）或 turn/end（aborted/error 且无消息）。 */
+        /** 流结束：assistant/message、turn/end、或 assistant-stream end 帧触发。 */
         void onStreamEnd(String sessionId);
     }
 
@@ -81,9 +87,9 @@ public class EventStream {
         void onDisconnected(String channel, String reason);
     }
 
-    /** events.host 通道名。 */
+    /** host 等价通道名（语义对应旧 events.host，实际走 $events 逻辑流）。 */
     public static final String CH_HOST = "host";
-    /** events.mux 通道名。 */
+    /** mux 等价通道名（语义对应旧 events.mux，实际走 WebSocket 连接本身）。 */
     public static final String CH_MUX = "mux";
 
     private static final String WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -99,29 +105,26 @@ public class EventStream {
     /** 握手响应头行长度上限。 */
     private static final int MAX_HEADER_LINE = 8 * 1024;
 
+    private static final String STREAM_ID_EVENTS = "dsh-ev-host";
+    private static final String PREFIX_CTRL = "dsh-ctrl:";
+    private static final String PREFIX_FOLLOW = "dsh-follow:";
+
     private final AtomicBoolean stopped = new AtomicBoolean(true);
     private final Object lock = new Object();
-    private final Set<String> streamingSessions = new HashSet<>();
+    private final Set<String> followSessions = new HashSet<>();
 
     private volatile String baseUrl;
     private volatile DshEventListener listener;
     private volatile ConnectionListener connectionListener;
-    private volatile Socket hostSocket;
     private volatile Socket muxSocket;
-    private volatile boolean hostConnected;
     private volatile boolean muxConnected;
-    private Thread hostThread;
     private Thread muxThread;
 
     // ---- 进程级"待处理交互"视图(修复:关掉 APP/重进会话后提问审批卡片无法唤醒) ----
-    // 官方 dsh 每次 /api/events.mux 订阅(含 APP 重启后的新连接)都会重放仍待处理的
-    // approval/requested、question/requested 帧(rpcId 不变、应答仍有效)。本 APP 事件通道
-    // 在 MainActivity 即启动、监听器要进入会话页才挂载;且用户按返回键切走会话页时
-    // 进程仍存活(不会再重放)。因此这里持续维护"当前 pending 视图":requested → 记录、
-    // resolved → 删除;ChatActivity 进入时主动 snapshotPendingInteractions() 拉取该视图
-    // 恢复卡片。mux 断开时清空(重连后的重放帧会重建它,避免陈旧残留)。
+    // 旧 events.mux 在每次连接建立后会重放仍待处理的 approval/requested、question/requested。
+    // 新协议经 session/follow 实时下推；连接代结束后清空、重连后的 item 会重建该视图。
     private final Object frameLock = new Object();
-    private final Map<String, JSONObject> pendingInteractionFrames = new LinkedHashMap<>();
+    private final LinkedHashMap<String, JSONObject> pendingInteractionFrames = new LinkedHashMap<>();
     private static final int MAX_PENDING_INTERACTION_FRAMES = 64;
 
     public EventStream() {
@@ -158,96 +161,115 @@ public class EventStream {
 
     /** 通道当前是否已连接（握手完成且未断开）。 */
     public boolean isChannelConnected(String channel) {
-        return CH_MUX.equals(channel) ? muxConnected : hostConnected;
+        return CH_MUX.equals(channel) ? muxConnected : false;
     }
 
     // ==================== 生命周期 ====================
 
-    /** 启动两条事件通道（幂等）。 */
+    /** 启动事件通道（幂等）。 */
     public void start() {
         synchronized (lock) {
             if (!stopped.get()) return;
             stopped.set(false);
-            streamingSessions.clear();
-            hostThread = new Thread(new Worker(CH_HOST, "/api/events.host"), "dsh-ev-host");
-            muxThread = new Thread(new Worker(CH_MUX, "/api/events.mux"), "dsh-ev-mux");
-            hostThread.setDaemon(true);
+            followSessions.clear();
+            muxThread = new Thread(new Worker(), "dsh-ev-mux");
             muxThread.setDaemon(true);
-            hostThread.start();
             muxThread.start();
         }
     }
 
-    /** 停止两条事件通道并释放连接（幂等；线程 join 至多 2s）。 */
+    /** 停止事件通道并释放连接（幂等；线程 join 至多 2s）。 */
     public void stop() {
         synchronized (lock) {
             if (stopped.get()) return;
             stopped.set(true);
-            closeSocket(hostSocket);
             closeSocket(muxSocket);
         }
-        joinQuietly(hostThread);
         joinQuietly(muxThread);
-        hostThread = null;
         muxThread = null;
         synchronized (this) {
-            hostConnected = false;
             muxConnected = false;
         }
-        streamingSessions.clear();
+        followSessions.clear();
+    }
+
+    /** 按需开启会话跟随流（UI 进入会话时调用）。 */
+    public void followSession(String sessionId) {
+        if (sessionId == null || sessionId.isEmpty()) return;
+        boolean changed;
+        synchronized (lock) {
+            changed = followSessions.add(sessionId);
+        }
+        if (changed && !stopped.get() && muxConnected) {
+            sendMuxOpenFollow(sessionId);
+        }
+    }
+
+    /** 按需关闭会话跟随流（UI 离开会话时调用；兼容旧 API）。 */
+    public void unfollowSession(String sessionId) {
+        if (sessionId == null || sessionId.isEmpty()) return;
+        String streamId;
+        synchronized (lock) {
+            if (!followSessions.remove(sessionId)) return;
+            streamId = PREFIX_FOLLOW + sessionId;
+        }
+        if (!stopped.get() && muxConnected) {
+            sendMuxCancel(streamId);
+        }
+    }
+
+    /**
+     * 旧兼容入口：设置"流式会话"（旧协议每个 session/event 帧携带 sessionId）。
+     * <p>新协议必须显式 open session/follow 才能收到该会话的实时事件，因此本方法
+     * 等价于 {@link #followSession}，供旧调用方继续使用。
+     */
+    public void setStreamingSession(String sessionId) {
+        followSession(sessionId);
+    }
+
+    /**
+     * 旧兼容入口：清除"流式会话"。
+     */
+    public void clearStreamingSession(String sessionId) {
+        unfollowSession(sessionId);
     }
 
     // ==================== 通道工作线程 ====================
 
-    /** 一条事件通道的驱动线程：连接 → 泵帧 → 断线退避重连。 */
+    /** 事件通道路线驱动线程：连接 → 泵帧 → 断线退避重连。 */
     private final class Worker implements Runnable {
-        final String channel;
-        final String path;
-
-        Worker(String channel, String path) {
-            this.channel = channel;
-            this.path = path;
-        }
-
         @Override
         public void run() {
             long delay = INITIAL_BACKOFF_MS;
             while (!stopped.get()) {
                 Conn conn = null;
                 try {
-
-                    conn = openSocket(channel, path);
-                    setChannelSocket(channel, conn.socket);
+                    conn = openSocket("/api/remote.mux");
+                    setMuxSocket(conn.socket);
                     if (stopped.get()) break;
-                    delay = INITIAL_BACKOFF_MS; // 握手成功 → 退避重置
-                    setChannelConnected(channel, true);
-                    fireConnected(channel);
-
-                    pump(channel, conn);
-                    // 正常/异常结束（服务端关闭、EOF、IO 异常）
+                    delay = INITIAL_BACKOFF_MS;
+                    setMuxConnected(true);
+                    fireConnected(CH_MUX);
+                    pumpMux(conn);
                     if (stopped.get()) break;
-                    fireDisconnected(channel, "stream closed");
-
+                    fireDisconnected(CH_MUX, "stream closed");
                 } catch (Exception e) {
                     if (stopped.get()) break;
-                    setChannelConnected(channel, false);
-                    fireDisconnected(channel, describe(e));
-
+                    setMuxConnected(false);
+                    fireDisconnected(CH_MUX, describe(e));
                 } finally {
                     closeSocket(conn != null ? conn.socket : null);
-                    setChannelConnected(channel, false);
+                    setMuxConnected(false);
                 }
                 if (stopped.get()) break;
                 long wait = delay;
                 delay = Math.min(delay * 2, MAX_BACKOFF_MS);
-
                 try {
                     Thread.sleep(wait);
                 } catch (InterruptedException ie) {
                     break;
                 }
             }
-
         }
     }
 
@@ -266,11 +288,9 @@ public class EventStream {
 
     /**
      * 建立 WS 连接：HTTP Upgrade 握手（校验 101 与 Sec-WebSocket-Accept）。
-     * 仅支持 http（本地回环明文）；https/wss 明确报错。
-     * <p>注意：握手响应与紧随的首批帧可能同段到达，BufferedInputStream 会一并缓冲——
-     * 因此返回的 Conn 携带该流，pump() 必须继续使用它，不能重新 getInputStream()。
+     * <p>新版握手必须携带 {@code Cookie: <DshAuth.cookieHeader()>} 与 {@code Host: 127.0.0.1:3081}。
      */
-    private Conn openSocket(String channel, String path) throws IOException {
+    private Conn openSocket(String path) throws IOException {
         URL u;
         try {
             u = new URL(baseUrl);
@@ -296,9 +316,13 @@ public class EventStream {
             new SecureRandom().nextBytes(nonce);
             String key = base64Encode(nonce);
 
+            String cookieHeader = com.aptuidsh.kui.env.DshAuth.cookieHeader();
             StringBuilder req = new StringBuilder(256);
             req.append("GET ").append(path).append(" HTTP/1.1\r\n");
             req.append("Host: ").append(host).append(":").append(port).append("\r\n");
+            if (cookieHeader != null && !cookieHeader.isEmpty()) {
+                req.append("Cookie: ").append(cookieHeader).append("\r\n");
+            }
             req.append("Upgrade: websocket\r\n");
             req.append("Connection: Upgrade\r\n");
             req.append("Sec-WebSocket-Key: ").append(key).append("\r\n");
@@ -329,7 +353,6 @@ public class EventStream {
                     throw new IOException("websocket handshake: bad Sec-WebSocket-Accept");
                 }
             }
-
             return new Conn(socket, in);
         } catch (IOException e) {
             closeSocket(socket);
@@ -357,24 +380,33 @@ public class EventStream {
         }
     }
 
-    // ==================== 帧泵 ====================
+    // ==================== 帧泵（mux 连接） ====================
 
     /** 循环读帧并分发，直到连接关闭/异常/stop()。 */
-    private void pump(String channel, Conn conn) throws IOException {
+    private void pumpMux(Conn conn) throws IOException {
         InputStream in = conn.in;
         OutputStream out = conn.socket.getOutputStream();
         boolean fragmenting = false;
         ByteArrayOutputStream fragment = new ByteArrayOutputStream(1024);
+
+        // 连接建立后立即 open 固定流：$events（全局事件）+ session/control（控制帧）+ 当前 follow 会话
+        sendMuxOpenEvents();
+        sendMuxOpenControl();
+        synchronized (lock) {
+            for (String sid : followSessions) {
+                sendMuxOpenFollow(sid);
+            }
+        }
+
         while (!stopped.get()) {
             Frame f = readFrame(in);
             if (f == null) {
                 return; // EOF / close
             }
-
             switch (f.opcode) {
                 case 0x1: // 文本帧
                     if (f.fin) {
-                        handleText(channel, f.payload);
+                        handleText(f.payload);
                     } else {
                         fragment.reset();
                         fragment.write(f.payload);
@@ -388,7 +420,7 @@ public class EventStream {
                             byte[] all = fragment.toByteArray();
                             fragment.reset();
                             fragmenting = false;
-                            handleText(channel, all);
+                            handleText(all);
                         }
                     }
                     break;
@@ -399,83 +431,239 @@ public class EventStream {
                     break;
                 case 0x8: // close：服务端主动关闭
                     return;
-                default: // 二进制/未知：忽略（downlink 只用文本帧）
+                default: // 二进制/未知：忽略
                     break;
             }
         }
     }
 
-    private void handleText(String channel, byte[] payload) {
+    private void handleText(byte[] payload) {
         String s = new String(payload, StandardCharsets.UTF_8);
-        if (s.length() == 0) return; // 空帧过滤
-        JSONObject envelope;
+        if (s.length() == 0) return;
+        JSONObject msg;
         try {
-            envelope = new JSONObject(s);
+            msg = new JSONObject(s);
         } catch (JSONException e) {
             return; // 非 JSON（心跳等）过滤
         }
-        dispatchEnvelope(channel, envelope);
+        String type = msg.optString("type", "");
+        if ("item".equals(type)) {
+            handleMuxItem(msg);
+        } else if ("error".equals(type)) {
+            // 服务端对 open/cancel 的应答错误；按需可升级为连接状态诊断，目前静默
+        }
+        // end/close 等帧暂不做特别处理
     }
 
-    // ==================== 分发 ====================
+    private void handleMuxItem(JSONObject msg) {
+        String streamId = msg.optString("streamId", "");
+        Object value = msg.opt("value");
+        if (value == null || !(value instanceof JSONObject)) return;
+        JSONObject item = (JSONObject) value;
+        String itemType = item.optString("type", "");
 
-    private void dispatchEnvelope(String channel, JSONObject envelope) {
-        JSONObject payload = envelope.optJSONObject("payload");
-        if (payload == null) {
+        if (STREAM_ID_EVENTS.equals(streamId)) {
+            dispatchHostItem(item, itemType);
             return;
         }
-        String type = payload.optString("type", "");
-        String sid = payload.optString("sessionId", "");
 
-        // 审批/提问交互帧:无论有无监听器都先更新"当前 pending 视图",
-        // 有监听器时再照常实时投递(实时弹窗路径与原版一致)。
-        if (CH_MUX.equals(channel) && isPendingInteractionType(type)) {
-            synchronized (frameLock) {
-                updatePendingInteractionView(envelope, payload, type);
-                if (listener == null) return;
+        if (streamId.startsWith(PREFIX_FOLLOW)) {
+            String sessionId = streamId.substring(PREFIX_FOLLOW.length());
+            dispatchFollowItem(sessionId, item, itemType);
+            return;
+        }
+
+        if (streamId.startsWith(PREFIX_CTRL)) {
+            dispatchControlItem(item, itemType);
+            return;
+        }
+    }
+
+    // ==================== 旧信封合成 ====================
+
+    /** 合成旧 server-request 信封（mux 通道）。 */
+    private static JSONObject muxEnvelope(String method, JSONObject payload) {
+        JSONObject envelope = new JSONObject();
+        try {
+            envelope.put("type", "server-request");
+            envelope.put("rpcId", UUID.randomUUID().toString());
+            envelope.put("method", method);
+            envelope.put("payload", payload == null ? new JSONObject() : payload);
+        } catch (JSONException ignored) {
+        }
+        return envelope;
+    }
+
+    /** 合成旧 server-request 信封（host 通道）。 */
+    private static JSONObject hostEnvelope(String method, JSONObject payload) {
+        return muxEnvelope(method, payload);
+    }
+
+    // ==================== $events（全局事件 → host 等价帧） ====================
+
+    private void dispatchHostItem(JSONObject item, String itemType) {
+        // $events 的 ready 帧用于标记连接代，UI 可扩展，但当前无旧映射
+        if ("emit".equals(itemType)) {
+            // 官方 Cordis emit 事件经 $events 下发，旧 host 通道转发的是 host/remote-event 信封
+            String event = item.optString("event", "");
+            Object argsObj = item.opt("args");
+            JSONObject payload = new JSONObject();
+            try {
+                payload.put("type", "host/remote-event");
+                payload.put("event", event);
+                if (argsObj != null) {
+                    payload.put("args", argsObj);
+                }
+            } catch (JSONException ignored) {
+            }
+            JSONObject envelope = hostEnvelope("host/remote-event", payload);
+            ModelCatalogSignals.acceptHostEnvelope(envelope);
+            DshEventListener l = listener;
+            if (l != null) l.onHostEvent(envelope);
+        }
+    }
+
+    // ==================== session/follow（会话实时流 → mux 等价帧） ====================
+
+    /**
+     * 把新 follow item 翻译回旧 mux 信封，驱动 UI 现有的 {@code onMuxEvent / onTextDelta / onStreamEnd}。
+     *
+     * <p><b>实测到的 $events 与 session/follow item 真实外壳</b>（0.1.5-rc.1）：
+     * <pre>
+     * // 全局事件流 ready
+     * {"type":"item","streamId":"dsh-ev-host","value":{"type":"ready","clientId":"...","host":{"home":"/root"}}}
+     *
+     * // 全局 Cordis emit（目录失效信号等）
+     * {"type":"item","streamId":"dsh-ev-host","value":{"type":"emit","event":"api-session/status","args":[...]}}
+     *
+     * // 会话 follow 快照
+     * {"type":"item","streamId":"dsh-follow:<sid>","value":{"type":"snapshot","header":{...},"cursor":2,"records":[...],"hasMore":false,"projections":{...},"assistantStream":{"revision":0}}}
+     *
+     * // 会话 follow 事件
+     * {"type":"item","streamId":"dsh-follow:<sid>","value":{"type":"event","event":{"type":"turn/start","seq":4,"time":...,"data":{...}}}}
+     *
+     * // 会话 follow assistant 流
+     * {"type":"item","streamId":"dsh-follow:<sid>","value":{"type":"assistant-stream","frame":{"type":"start|chunk|end",...}}}
+     * </pre>
+     */
+    private void dispatchFollowItem(String sessionId, JSONObject item, String itemType) {
+        if ("snapshot".equals(itemType)) {
+            // 首帧快照：翻译为旧 session/event + session/subscribed
+            dispatchSnapshotAsSessionEvent(sessionId, item);
+            return;
+        }
+
+        if ("event".equals(itemType)) {
+            JSONObject event = item.optJSONObject("event");
+            if (event == null) return;
+
+            // 审批/提问交互帧：无论有无监听器都先维护 pending 视图
+            String eventTypeName = event.optString("type", "");
+            if (isPendingInteractionEventType(eventTypeName)) {
+                JSONObject envelope = buildSessionEventEnvelope(sessionId, event);
+                synchronized (frameLock) {
+                    updatePendingInteractionView(envelope, event, eventTypeName);
+                    if (listener == null) return;
+                }
+            }
+
+            // 正常走旧 session/event 信封路径
+            JSONObject envelope = buildSessionEventEnvelope(sessionId, event);
+            DshEventListener l = listener;
+            if (l != null) l.onMuxEvent(envelope);
+
+            handleSessionEvent(sessionId, event);
+            return;
+        }
+
+        if ("assistant-stream".equals(itemType)) {
+            JSONObject frame = item.optJSONObject("frame");
+            if (frame == null) return;
+            String frameType = frame.optString("type", "");
+            if ("chunk".equals(frameType)) {
+                handleAssistantChunk(sessionId, frame);
+            } else if ("end".equals(frameType)) {
+                handleAssistantEnd(sessionId, frame);
+            }
+            // start 帧：暂不做特别处理，由 event 侧的 turn/start 覆盖
+            return;
+        }
+    }
+
+    private void dispatchSnapshotAsSessionEvent(String sessionId, JSONObject snapshot) {
+        // 按 records 顺序投递每条事件帧，模拟旧 events.mux 重放
+        DshEventListener l = listener;
+        if (l == null) return;
+
+        // 优先按 records 数组投递（官方 follow 里 records 为事件数组）
+        // records 每条形如 {"type":"event","event":{...}}
+        // 由于旧 UI 主要靠 event.type 判断，这里逐条投递
+        org.json.JSONArray recordsArr = snapshot.optJSONArray("records");
+        if (recordsArr != null) {
+            for (int i = 0; i < recordsArr.length(); i++) {
+                JSONObject rec = recordsArr.optJSONObject(i);
+                if (rec == null) continue;
+                JSONObject ev = rec.optJSONObject("event");
+                if (ev == null) continue;
+                JSONObject envelope = buildSessionEventEnvelope(sessionId, ev);
+                l.onMuxEvent(envelope);
+                handleSessionEvent(sessionId, ev);
             }
         }
 
-        DshEventListener l = listener;
-
-        if (CH_HOST.equals(channel)) {
-            // 模型目录实时性(对齐官方 ui-model-selection 的 ModelDirectoryResolver):
-            // Host 经 events.host 转发 llm/adapters-updated 与 settings/document-updated,
-            // 任一到达即视为「目录已失效」。此处独立于监听器处理——事件通道在 MainActivity
-            // 启动、监听器要进会话页才挂载,而目录失效必须在任意时刻都能被记录,
-            // 否则用户在设置页改完模型后回到会话页仍看到旧列表。
-            ModelCatalogSignals.acceptHostEnvelope(envelope);
-            if (l != null) l.onHostEvent(envelope);
-            return;
-        }
-        if (l != null) l.onMuxEvent(envelope);
-        if ("session/event".equals(type)) {
-            JSONObject event = payload.optJSONObject("event");
-            if (event != null) handleSessionEvent(payload.optString("sessionId", ""), event);
-        } else if ("session/subscribed".equals(type)) {
-            // 新连接代：清掉上一代的流式跟踪，避免误触发 onStreamEnd
-            String sids = payload.optString("sessionId", "");
-            if (sids.length() > 0) streamingSessions.remove(sids);
+        // 快照里的投影帧也要投递一次，否则 UI 不会刷新 permissions/modelSelection 等
+        JSONObject projections = snapshot.optJSONObject("projections");
+        if (projections != null) {
+            JSONObject values = projections.optJSONObject("values");
+            if (values != null) {
+                // 逐 key 投递 projection
+                for (java.util.Iterator<String> it = values.keys(); it.hasNext(); ) {
+                    String key = it.next();
+                    Object value = values.opt(key);
+                    JSONObject payload = new JSONObject();
+                    try {
+                        payload.put("type", "session/projection");
+                        payload.put("sessionId", sessionId);
+                        payload.put("key", key);
+                        payload.put("value", value);
+                    } catch (JSONException ignored) {
+                    }
+                    l.onMuxEvent(muxEnvelope("session/projection", payload));
+                }
+            }
         }
     }
 
-    /** 该 mux 帧类型是否属于"审批/提问请求与解决"(需维护视图的交互帧)。 */
-    private static boolean isPendingInteractionType(String type) {
+    private JSONObject buildSessionEventEnvelope(String sessionId, JSONObject event) {
+        JSONObject payload = new JSONObject();
+        try {
+            payload.put("type", "session/event");
+            payload.put("sessionId", sessionId);
+            payload.put("event", event);
+        } catch (JSONException ignored) {
+        }
+        return muxEnvelope("session/event", payload);
+    }
+
+    /** 该 follow event.type 是否属于"审批/提问请求与解决"(需维护视图的交互帧)。 */
+    private static boolean isPendingInteractionEventType(String type) {
         return "approval/requested".equals(type) || "approval/resolved".equals(type)
             || "question/requested".equals(type) || "question/resolved".equals(type);
     }
 
     /** 更新进程级 pending 视图(调用方须持有 frameLock):requested 记录、resolved 删除。 */
-    private void updatePendingInteractionView(JSONObject envelope, JSONObject payload, String type) {
-        String sid = payload.optString("sessionId", "");
+    private void updatePendingInteractionView(JSONObject envelope, JSONObject event, String type) {
+        JSONObject data = event.optJSONObject("data");
+        String sid = event.optString("sessionId", "");
+        if (sid.isEmpty() && data != null) sid = data.optString("sessionId", "");
         boolean approval = type.startsWith("approval/");
         boolean requested = type.endsWith("/requested");
         String id = approval
-            ? payload.optString("approvalId", "")
+            ? event.optString("approvalId", event.optString("id", ""))
             : (requested
                 ? envelope.optString("rpcId", "")
-                : payload.optString("questionRpcId", ""));
-        if (sid.isEmpty() || id.isEmpty()) return; // 缺会话/缺 id:不可寻址,忽略
+                : event.optString("questionRpcId", event.optString("rpcId", "")));
+        if (sid.isEmpty() || id.isEmpty()) return;
         String key = sid + "|" + (approval ? "a" : "q") + "|" + id;
         if (requested) {
             pendingInteractionFrames.remove(key);
@@ -503,50 +691,186 @@ public class EventStream {
     private void handleSessionEvent(String sessionId, JSONObject event) {
         String et = event.optString("type", "");
         if ("turn/start".equals(et)) {
-
-            if (sessionId.length() > 0) streamingSessions.add(sessionId);
-            return;
-        }
-        if ("assistant/chunk".equals(et)) {
-            JSONObject data = event.optJSONObject("data");
-            if (data == null) return;
-            JSONObject chunk = data.optJSONObject("chunk");
-            if (chunk == null) return;
-            String ctype = chunk.optString("type", "");
-            if (!"text-delta".equals(ctype)) {
-                return; // reasoning/tool-call 增量走原始帧
-            }
-            String text = chunk.optString("text", "");
-            if (text.length() == 0) return; // 空 delta 过滤
-
-            JSONObject meta = new JSONObject();
-            try {
-                meta.put("seq", event.optLong("seq", 0L));
-                meta.put("turn", data.optInt("turn", 0));
-                meta.put("step", data.optInt("step", 0));
-                meta.put("index", chunk.optInt("index", 0));
-            } catch (JSONException ignored) {
-                // meta 组装失败仍可回调
-            }
-            DshEventListener l = listener;
-            if (l != null) l.onTextDelta(sessionId, text, meta);
             return;
         }
         if ("assistant/message".equals(et)) {
-            // 最终消息（含中断/错误时带部分内容）→ 流结束
-
-            streamingSessions.remove(sessionId);
             DshEventListener l = listener;
             if (l != null) l.onStreamEnd(sessionId);
             return;
         }
         if ("turn/end".equals(et)) {
-            // 轮次结束：若此前没有 assistant/message（如 abort 于首 token 前/error），补发流结束
+            DshEventListener l = listener;
+            if (l != null) l.onStreamEnd(sessionId);
+        }
+    }
 
-            if (streamingSessions.remove(sessionId)) {
-                DshEventListener l = listener;
-                if (l != null) l.onStreamEnd(sessionId);
+    /** assistant-stream chunk 处理：text-delta → onTextDelta；其它 chunk 经 onMuxEvent 原样投递。 */
+    private void handleAssistantChunk(String sessionId, JSONObject frame) {
+        JSONObject chunk = frame.optJSONObject("chunk");
+        if (chunk == null) return;
+        String chunkType = chunk.optString("type", "");
+        if ("text-delta".equals(chunkType)) {
+            String text = chunk.optString("text", "");
+            if (text.isEmpty()) return;
+            JSONObject meta = new JSONObject();
+            try {
+                meta.put("attemptId", frame.optString("attemptId", ""));
+                meta.put("revision", frame.optInt("revision", 0));
+                meta.put("index", frame.optInt("index", 0));
+            } catch (JSONException ignored) {
             }
+            DshEventListener l = listener;
+            if (l != null) l.onTextDelta(sessionId, text, meta);
+            return;
+        }
+
+        // 非 text-delta chunk（block-start/block-end/usage/finish 等）→ 翻译为旧 assistant/chunk 信封
+        DshEventListener l = listener;
+        if (l == null) return;
+        JSONObject event = new JSONObject();
+        try {
+            event.put("type", "assistant/chunk");
+            JSONObject data = new JSONObject();
+            data.put("chunk", chunk);
+            event.put("data", data);
+        } catch (JSONException ignored) {
+        }
+        l.onMuxEvent(buildSessionEventEnvelope(sessionId, event));
+    }
+
+    /** assistant-stream end 处理：最终成功/放弃 → onStreamEnd。 */
+    private void handleAssistantEnd(String sessionId, JSONObject frame) {
+        DshEventListener l = listener;
+        if (l != null) l.onStreamEnd(sessionId);
+    }
+
+    // ==================== session/control（控制帧 → mux projection/queue 信封） ====================
+
+    private void dispatchControlItem(JSONObject item, String itemType) {
+        if ("baseline".equals(itemType) || "update".equals(itemType)) {
+            dispatchControlProjections(item);
+            dispatchControlQueues(item);
+        }
+    }
+
+    private void dispatchControlProjections(JSONObject item) {
+        DshEventListener l = listener;
+        if (l == null) return;
+        JSONObject value = item.optJSONObject("value");
+        if (value == null) return;
+        JSONObject projections = value.optJSONObject("projections");
+        if (projections == null) return;
+        for (java.util.Iterator<String> it = projections.keys(); it.hasNext(); ) {
+            String sessionId = it.next();
+            JSONObject projValues = projections.optJSONObject(sessionId);
+            if (projValues == null) continue;
+            JSONObject values = projValues.optJSONObject("values");
+            if (values == null) continue;
+            for (java.util.Iterator<String> k = values.keys(); k.hasNext(); ) {
+                String key = k.next();
+                Object val = values.opt(key);
+                JSONObject payload = new JSONObject();
+                try {
+                    payload.put("type", "session/projection");
+                    payload.put("sessionId", sessionId);
+                    payload.put("key", key);
+                    payload.put("value", val);
+                } catch (JSONException ignored) {
+                }
+                l.onMuxEvent(muxEnvelope("session/projection", payload));
+            }
+        }
+    }
+
+    private void dispatchControlQueues(JSONObject item) {
+        DshEventListener l = listener;
+        if (l == null) return;
+        JSONObject value = item.optJSONObject("value");
+        if (value == null) return;
+        JSONObject queues = value.optJSONObject("queues");
+        if (queues == null) return;
+        for (java.util.Iterator<String> it = queues.keys(); it.hasNext(); ) {
+            String sessionId = it.next();
+            org.json.JSONArray arr = queues.optJSONArray(sessionId);
+            if (arr == null) continue;
+            JSONObject payload = new JSONObject();
+            try {
+                payload.put("type", "session/queue");
+                payload.put("sessionId", sessionId);
+                payload.put("items", arr);
+            } catch (JSONException ignored) {
+            }
+            l.onMuxEvent(muxEnvelope("session/queue", payload));
+        }
+    }
+
+    // ==================== 发送 mux open/cancel ====================
+
+    private void sendMuxOpenEvents() {
+        JSONObject payload = new JSONObject();
+        try {
+            payload.put("args", new JSONObject());
+        } catch (JSONException ignored) {
+        }
+        sendMuxOpen(STREAM_ID_EVENTS, "$events", payload);
+    }
+
+    private void sendMuxOpenControl() {
+        JSONObject payload = new JSONObject();
+        try {
+            payload.put("args", new JSONObject());
+        } catch (JSONException ignored) {
+        }
+        sendMuxOpen(PREFIX_CTRL + "global", "session/control", payload);
+    }
+
+    private void sendMuxOpenFollow(String sessionId) {
+        JSONObject payload = new JSONObject();
+        try {
+            JSONObject request = new JSONObject();
+            JSONObject address = new JSONObject();
+            address.put("kind", "session");
+            address.put("sessionId", sessionId);
+            request.put("address", address);
+            request.put("assistantStream", true);
+            payload.put("args", new JSONObject().put("request", request));
+        } catch (JSONException ignored) {
+        }
+        sendMuxOpen(PREFIX_FOLLOW + sessionId, "session/follow", payload);
+    }
+
+    private void sendMuxCancel(String streamId) {
+        JSONObject msg = new JSONObject();
+        try {
+            msg.put("type", "cancel");
+            msg.put("streamId", streamId);
+        } catch (JSONException ignored) {
+        }
+        sendTextFrame(msg.toString());
+    }
+
+    private void sendMuxOpen(String streamId, String endpoint, JSONObject payload) {
+        JSONObject msg = new JSONObject();
+        try {
+            msg.put("type", "open");
+            msg.put("streamId", streamId);
+            msg.put("endpoint", endpoint);
+            msg.put("payload", payload == null ? new JSONObject() : payload);
+        } catch (JSONException ignored) {
+        }
+        sendTextFrame(msg.toString());
+    }
+
+    private void sendTextFrame(String text) {
+        Socket s = muxSocket;
+        if (s == null || s.isClosed()) return;
+        try {
+            OutputStream out = s.getOutputStream();
+            synchronized (out) {
+                sendFrame(out, 0x1, text.getBytes(StandardCharsets.UTF_8));
+            }
+        } catch (IOException ignored) {
+            // 发送失败时由读帧侧检测断连并触发重连
         }
     }
 
@@ -589,7 +913,7 @@ public class EventStream {
     /** 读一帧；EOF/close 返回 null。 */
     private static Frame readFrame(InputStream in) throws IOException {
         int b0 = in.read();
-        if (b0 < 0) return null; // EOF
+        if (b0 < 0) return null;
         int b1 = in.read();
         if (b1 < 0) throw new EOFException("websocket: truncated frame header");
         boolean fin = (b0 & 0x80) != 0;
@@ -622,7 +946,7 @@ public class EventStream {
         return new Frame(fin, b0 & 0x0F, payload);
     }
 
-    /** 发送一帧（客户端帧须掩码）。用于回 pong。 */
+    /** 发送一帧（客户端帧须掩码）。用于回 pong 与发送文本帧。 */
     private static void sendFrame(OutputStream out, int opcode, byte[] payload) throws IOException {
         byte[] mask = new byte[4];
         new SecureRandom().nextBytes(mask);
@@ -703,23 +1027,17 @@ public class EventStream {
         return b;
     }
 
-    private void setChannelSocket(String channel, Socket socket) {
-        if (CH_MUX.equals(channel)) muxSocket = socket;
-        else hostSocket = socket;
+    private void setMuxSocket(Socket socket) {
+        muxSocket = socket;
     }
 
-    private void setChannelConnected(String channel, boolean connected) {
-        if (CH_MUX.equals(channel)) {
-            muxConnected = connected;
-            if (!connected) {
-                // 连接代结束:清空 pending 视图(重连后 events.mux 会重放仍待处理的帧重建它,
-                // 避免断线期间被解决/取消的请求残留成陈旧卡片)。
-                synchronized (frameLock) {
-                    pendingInteractionFrames.clear();
-                }
+    private void setMuxConnected(boolean connected) {
+        muxConnected = connected;
+        if (!connected) {
+            // 连接代结束:清空 pending 视图(重连后的 follow item 会重建它,避免陈旧残留)。
+            synchronized (frameLock) {
+                pendingInteractionFrames.clear();
             }
-        } else {
-            hostConnected = connected;
         }
     }
 
