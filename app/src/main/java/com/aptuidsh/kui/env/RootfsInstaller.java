@@ -56,9 +56,13 @@ public final class RootfsInstaller {
     public static void install(Context ctx, Progress progress) throws IOException {
         cancelled = false;
         File root = ProrootEnv.rootfsDir(ctx);
+        EnvLog.i("安装开始：target=" + root.getAbsolutePath()
+                + "，可用空间=" + (root.getParentFile() == null ? "?" :
+                (root.getParentFile().getUsableSpace() >> 20) + "MB"));
         File marker = ProrootEnv.installMarker(ctx);
 
         if (ProrootEnv.isInstalled(ctx)) {
+            EnvLog.i("环境已安装，跳过");
             report(progress, "环境已就绪", 100);
             return;
         }
@@ -75,6 +79,11 @@ public final class RootfsInstaller {
         // 若在解压途中被清掉会导致 rootfs 半成品（filesDir 不可被系统回收）。
         File archive = new File(ctx.getFilesDir(), ProrootEnv.ROOTFS_ASSET);
         long total = assetSize(ctx);
+        EnvLog.i("读取内置镜像 assets/" + ProrootEnv.ROOTFS_ASSET
+                + "，报告大小=" + (total >> 20) + "MB -> " + archive.getAbsolutePath());
+        if (total <= 0) {
+            EnvLog.w("assetSize 返回 " + total + "，进度条将退化为不确定态（不影响安装）");
+        }
         long copied = 0;
         report(progress, "释放内置运行环境…", 3);
         try (InputStream in = ctx.getAssets().open(ProrootEnv.ROOTFS_ASSET, AssetManager.ACCESS_STREAMING);
@@ -98,6 +107,7 @@ public final class RootfsInstaller {
         }
 
         checkCancelled();
+        EnvLog.i("镜像释放完成：" + (archive.length() >> 20) + "MB 已落盘");
         report(progress, "正在展开 Linux 根文件系统（约 3 万个文件）…", 38);
         //noinspection ResultOfMethodCallIgnored
         root.mkdirs();
@@ -132,8 +142,8 @@ public final class RootfsInstaller {
 
         //noinspection ResultOfMethodCallIgnored
         archive.delete();
+        EnvLog.i("安装完成：rootfs=" + root.getAbsolutePath());
         report(progress, "环境就绪", 100);
-        Log.i(TAG, "rootfs installed at " + root.getAbsolutePath());
     }
 
     /** 删除已安装的 rootfs（释放空间）。 */
@@ -154,11 +164,19 @@ public final class RootfsInstaller {
 
     private static void runTarExtract(File archive, File root, Progress progress) throws IOException {
         // 与 Termux 端验证过的调用方式完全一致：工作目录设为 rootfs，解压归档到当前目录
+        EnvLog.i("执行解压: /system/bin/tar -xJf " + archive.getAbsolutePath()
+                + " (cwd=" + root.getAbsolutePath() + ")");
         ProcessBuilder pb = new ProcessBuilder(
                 "/system/bin/tar", "-xJf", archive.getAbsolutePath());
         pb.directory(root);
         pb.redirectErrorStream(true);
-        Process p = pb.start();
+        Process p;
+        try {
+            p = pb.start();
+        } catch (IOException e) {
+            EnvLog.e("无法启动 /system/bin/tar（Android 缺少 toybox tar？）", e);
+            throw e;
+        }
 
         Thread poller = new Thread(() -> {
             int pct = 40;
@@ -196,6 +214,7 @@ public final class RootfsInstaller {
             p.destroy();
             throw new IOException("解压被中断");
         }
+        EnvLog.i("tar 退出码=" + code + (tail.length() > 0 ? "，输出：" + tail.toString().trim() : ""));
         if (code != 0) {
             throw new IOException("解压 rootfs 失败 (tar exit=" + code + ")"
                     + (tail.length() > 0 ? "\n" + tail : ""));
@@ -212,6 +231,7 @@ public final class RootfsInstaller {
         };
         for (String rel : required) {
             if (!new File(root, rel).exists()) {
+                EnvLog.e("rootfs 校验失败：缺少 " + rel, null);
                 throw new IOException("rootfs 不完整，缺少 " + rel);
             }
         }
@@ -222,6 +242,7 @@ public final class RootfsInstaller {
                 AssetManager.ACCESS_UNKNOWN)) {
             return in.available();
         } catch (IOException e) {
+            EnvLog.e("读取 asset 大小失败", e);
             return -1;
         }
     }
