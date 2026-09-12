@@ -53,16 +53,18 @@ public final class MuxClient {
      */
     public static JSONObject openAndFirstItem(String baseUrl, String endpoint,
                                               JSONObject args, int timeoutMs) throws IOException {
-        String wsBase = baseUrl.replaceFirst("^http://", "ws://").replaceFirst("^https://", "wss://");
-        URL url = new URL(wsBase + "/api/remote.mux");
+        // 注意：不能用 new URL("ws://…") —— java.net.URL 没有 ws 协议处理器，
+        // 会抛 MalformedURLException: unknown protocol: ws。
+        // 这里保持 http 形式解析出 host/port，WebSocket 握手只用到这两个值 + 路径。
+        URL url = new URL(baseUrl);
+        String host = url.getHost();
+        int port = url.getPort() < 0 ? 80 : url.getPort();
         Socket socket = new Socket();
         try {
-            socket.connect(new InetSocketAddress(url.getHost(), url.getPort() < 0 ? 80 : url.getPort()),
-                    Math.min(timeoutMs, 8000));
+            socket.connect(new InetSocketAddress(host, port), Math.min(timeoutMs, 8000));
             socket.setSoTimeout(timeoutMs);
 
-            String host = url.getHost() + ":" + (url.getPort() < 0 ? 80 : url.getPort());
-            handshake(socket, url.getPath(), host);
+            handshake(socket, "/api/remote.mux", host + ":" + port);
 
             JSONObject open = new JSONObject();
             try {

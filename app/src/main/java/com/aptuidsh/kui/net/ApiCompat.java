@@ -54,13 +54,18 @@ public final class ApiCompat {
     /** 合成方法标记（不属于服务端，由 {@link DshClient} 本地组装）。 */
     public static final String SYNTHETIC_HOST_DESCRIBE = "$synthetic/host.describe";
 
+    /** 合成方法标记：会话历史改由一次性 follow 快照提供（见 {@link DshClient}）。 */
+    public static final String SYNTHETIC_SESSION_HISTORY = "$synthetic/session.history";
+
     private static final Map<String, String> METHOD = new HashMap<>();
 
     static {
         // session
         METHOD.put("session.create", "session/create");
         METHOD.put("session.prompt", "session/prompt");
-        METHOD.put("session.history", "session/page");
+        // session/page 要求 throughSeq 不得超过会话游标，无法从平铺载荷直接构造，
+        // 因此标记为合成方法，由 DshClient 用一次性 follow 快照取历史。
+        METHOD.put("session.history", SYNTHETIC_SESSION_HISTORY);
         METHOD.put("session.list", "session/list");
         METHOD.put("session.rename", "session/rename");
         METHOD.put("session.fork", "session/fork");
@@ -282,15 +287,21 @@ public final class ApiCompat {
                     break;
 
                 case "llm.discoverModels":
+                    // 描述符: llm/discoverModels(settingsNs: string, request: LlmModelDiscoveryRequest)
                     if (p.has("settingsNs")) args.put("settingsNs", p.optString("settingsNs", ""));
+                    args.put("request", p.optJSONObject("request") == null
+                            ? new JSONObject() : p.optJSONObject("request"));
                     break;
 
                 case "agentPreset.read":
-                case "agentPreset.select":
+                    // 描述符: agentPresets/read(agentPreset: string)
                     args.put("agentPreset", p.optString("agentPreset", ""));
-                    if (oldPath.endsWith("select")) {
-                        args.put("sessionId", p.optString("sessionId", ""));
-                    }
+                    break;
+
+                case "agentPreset.select":
+                    // 描述符: agentPresets/select(agentId: SessionId, agentPreset: string)
+                    args.put("agentId", p.optString("agentId", p.optString("sessionId", "")));
+                    args.put("agentPreset", p.optString("agentPreset", ""));
                     break;
 
                 case "agentPreset.copy":
@@ -364,28 +375,42 @@ public final class ApiCompat {
                 case "subagent.list":
                 case "subagents/list":
                 case "subagent.history": {
-                    JSONObject req = new JSONObject();
-                    req.put("parentSessionId", p.optString("parentSessionId", p.optString("sessionId", "")));
-                    args.put("request", req);
+                    // 描述符: subagents/list(parentSessionId: SessionId) —— 扁平键，不包 request
+                    args.put("parentSessionId",
+                            p.optString("parentSessionId", p.optString("sessionId", "")));
                     break;
                 }
 
                 case "subagent.prompt":
-                case "subagents/prompt":
-                case "subagent.interrupt":
-                case "subagents/interruptByParent": {
+                case "subagents/prompt": {
+                    // 描述符: subagents/prompt(request: SubagentPromptRequest)
                     JSONObject req = new JSONObject();
-                    for (String k : new String[]{"parentSessionId", "childSessionId", "sessionId",
-                            "prompt", "text", "content", "mode"}) {
-                        copyIfPresent(p, req, k);
-                    }
-                    if (p.has("sessionId") && !req.has("parentSessionId")) {
-                        req.put("parentSessionId", p.optString("sessionId", ""));
+                    if (p.has("request")) {
+                        req = p.optJSONObject("request");
+                        if (req == null) req = new JSONObject();
+                    } else {
+                        for (String k : new String[]{"parentSessionId", "prompt", "text",
+                                "content", "mode", "agentPreset", "cwd"}) {
+                            copyIfPresent(p, req, k);
+                        }
+                        if (p.has("sessionId") && !req.has("parentSessionId")) {
+                            req.put("parentSessionId", p.optString("sessionId", ""));
+                        }
                     }
                     args.put("request", req);
                     break;
                 }
 
+                case "subagent.interrupt":
+                case "subagents/interruptByParent": {
+                    // 描述符: subagents/interruptByParent(childSessionId, parentSessionId, mode)
+                    args.put("childSessionId", p.optString("childSessionId", p.optString("sessionId", "")));
+                    args.put("parentSessionId", p.optString("parentSessionId", ""));
+                    args.put("mode", p.optString("mode", "continuable"));
+                    break;
+                }
+
+                // goals/* 一律以 agentId 寻址（旧版用 sessionId）
                 case "goal.get":
                 case "goal.create":
                 case "goal.edit":
@@ -393,19 +418,35 @@ public final class ApiCompat {
                 case "goal.resume":
                 case "goal.complete":
                 case "goal.clear": {
-                    args.put("sessionId", p.optString("sessionId", ""));
-                    for (String k : new String[]{"ref", "objective", "maxGoalRounds", "action",
-                            "blockedReason"}) {
+                    args.put("agentId", p.optString("agentId", p.optString("sessionId", "")));
+                    for (String k : new String[]{"ref", "maxGoalRounds", "action", "blockedReason"}) {
                         copyIfPresent(p, args, k);
+                    }
+                    if (p.has("request")) {
+                        args.put("request", p.optJSONObject("request"));
+                    } else if (p.has("objective")) {
+                        JSONObject req = new JSONObject();
+                        copyIfPresent(p, req, "objective");
+                        copyIfPresent(p, req, "maxGoalRounds");
+                        args.put("request", req);
                     }
                     break;
                 }
 
                 case "commands/list":
                 case "commands/execute": {
-                    // 旧版已是 {args:{...}} 形状
+                    // 旧版已是 {args:{agentId,…}}，而新描述符的形参名恰好也是 agentId/line，
+                    // 只需把内层对象平铺上来，并把旧键 images 换成 submittedAttachments。
                     JSONObject inner = p.optJSONObject("args");
-                    args.put("args", inner == null ? new JSONObject() : inner);
+                    if (inner == null) inner = new JSONObject();
+                    for (java.util.Iterator<String> it = inner.keys(); it.hasNext(); ) {
+                        String k = it.next();
+                        if ("images".equals(k)) {
+                            args.put("submittedAttachments", inner.get(k));
+                        } else {
+                            args.put(k, inner.get(k));
+                        }
+                    }
                     break;
                 }
 
