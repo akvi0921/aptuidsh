@@ -36,6 +36,43 @@ public class DshService extends Service {
     public static final String ACTION_INSTALL_START = "com.aptuidsh.kui.action.BACKEND_INSTALL_START";
 
     private volatile boolean workerBusy;
+    private android.os.PowerManager.WakeLock wakeLock;
+
+    /**
+     * 安装/启动期间持一把 PARTIAL_WAKE_LOCK。
+     *
+     * <p>解压 585MB 需要十几秒到几分钟，期间用户很可能熄屏；若 CPU 进入休眠，
+     * 解压会长时间停滞，界面看起来就像「卡住没反应」。
+     */
+    private void acquireWakeLock() {
+        try {
+            if (wakeLock == null) {
+                android.os.PowerManager pm =
+                        (android.os.PowerManager) getSystemService(POWER_SERVICE);
+                if (pm != null) {
+                    wakeLock = pm.newWakeLock(
+                            android.os.PowerManager.PARTIAL_WAKE_LOCK, "aptuidsh:bootstrap");
+                    wakeLock.setReferenceCounted(false);
+                }
+            }
+            if (wakeLock != null && !wakeLock.isHeld()) {
+                wakeLock.acquire(30 * 60 * 1000L);
+                EnvLog.i("已持有唤醒锁（防止熄屏导致解压停滞）");
+            }
+        } catch (Throwable t) {
+            EnvLog.w("获取唤醒锁失败: " + t);
+        }
+    }
+
+    private void releaseWakeLock() {
+        try {
+            if (wakeLock != null && wakeLock.isHeld()) {
+                wakeLock.release();
+                EnvLog.i("已释放唤醒锁");
+            }
+        } catch (Throwable ignored) {
+        }
+    }
 
     /** 便捷入口：请求启动后端。 */
     public static void requestStart(Context ctx) {
@@ -154,6 +191,7 @@ public class DshService extends Service {
             return;
         }
         workerBusy = true;
+        acquireWakeLock();
         Thread t = new Thread(() -> {
             try {
                 r.run();
@@ -161,6 +199,7 @@ public class DshService extends Service {
                 Log.e(TAG, "service task failed", e);
             } finally {
                 workerBusy = false;
+                releaseWakeLock();
             }
         }, "aptuidsh-backend-worker");
         t.setDaemon(true);

@@ -238,6 +238,65 @@ public final class ProrootEnv {
         return out;
     }
 
+    // ------------------------------------------------------------------ 诊断报告
+
+    /**
+     * 把环境事实与最近日志写成一份「用户可直接发送」的报告文件。
+     *
+     * <p>写到 {@code getExternalFilesDir()}：**不需要任何权限**，用系统文件管理器即可打开，
+     * 路径形如 {@code Android/data/com.aptuidsh.kui/files/env-report.txt}。
+     * 真机出问题时，这份文件就是唯一的客观证据（没有 logcat 权限时尤其关键）。
+     */
+    public static File writeEnvReport(Context ctx) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("APTUIDSH 环境诊断报告\n");
+        sb.append("生成时间: ").append(new java.util.Date()).append('\n');
+        sb.append("设备: ").append(android.os.Build.MANUFACTURER).append(' ')
+          .append(android.os.Build.MODEL).append(" / Android ")
+          .append(android.os.Build.VERSION.RELEASE)
+          .append(" (API ").append(android.os.Build.VERSION.SDK_INT).append(")\n");
+        sb.append("ABI: ").append(java.util.Arrays.toString(android.os.Build.SUPPORTED_ABIS)).append('\n');
+        try {
+            sb.append("版本: ").append(ctx.getPackageManager()
+                    .getPackageInfo(ctx.getPackageName(), 0).versionName).append('\n');
+        } catch (Throwable ignored) {
+        }
+        sb.append('\n').append("---- 环境事实核查 ----\n");
+        for (String line : diagnose(ctx)) {
+            sb.append(line).append('\n');
+        }
+        sb.append('\n').append("---- 启动器自检 ----\n");
+        Smoke launcher = smokeTestLauncher(ctx);
+        sb.append("ok=").append(launcher.ok).append(' ').append(launcher.summary).append('\n');
+        sb.append(launcher.output).append('\n');
+        if (isInstalled(ctx)) {
+            Smoke guest = smokeTestGuest(ctx);
+            sb.append('\n').append("---- guest 自检 ----\n");
+            sb.append("ok=").append(guest.ok).append(' ').append(guest.summary).append('\n');
+            sb.append(guest.output).append('\n');
+        }
+        sb.append('\n').append("---- 全过程日志 ----\n");
+        for (String line : EnvLog.lines()) {
+            sb.append(line).append('\n');
+        }
+
+        File dir = ctx.getExternalFilesDir(null);
+        if (dir == null) dir = ctx.getFilesDir();
+        if (!dir.exists()) {
+            //noinspection ResultOfMethodCallIgnored
+            dir.mkdirs();
+        }
+        File out = new File(dir, "env-report.txt");
+        try (java.io.FileOutputStream fos = new java.io.FileOutputStream(out, false)) {
+            fos.write(sb.toString().getBytes(StandardCharsets.UTF_8));
+            EnvLog.i("诊断报告已写入 " + out.getAbsolutePath());
+            return out;
+        } catch (IOException e) {
+            EnvLog.e("写诊断报告失败", e);
+            return null;
+        }
+    }
+
     // ------------------------------------------------------------------ 自检
 
     /** 自检结果。 */

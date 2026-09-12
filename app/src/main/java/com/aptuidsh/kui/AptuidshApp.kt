@@ -31,6 +31,16 @@ class AptuidshApp : Application() {
         ApiCompat.setDshVersion(readDshVersion())
         syncGuestResolvConf()
         maybeAutoStartBackend()
+        // 后台线程写一份「用户可直接发送」的诊断报告：
+        // 真机上没有 logcat 权限时，这就是唯一客观证据。
+        Thread {
+            try {
+                com.aptuidsh.kui.env.EnvLog.i("== 生成启动诊断报告 ==")
+                ProrootEnv.writeEnvReport(this)
+            } catch (t: Throwable) {
+                com.aptuidsh.kui.env.EnvLog.e("写诊断报告异常", t)
+            }
+        }.start()
     }
 
     /**
@@ -117,9 +127,24 @@ class AptuidshApp : Application() {
         }
     }
 
-    /** 环境已就绪就自动启动后端；未安装则交给首屏引导，不在后台静默下载/解压。 */
+    /**
+     * 自动引导：环境已装好就拉起后端；**未装则直接开始安装**。
+     *
+     * <p>为什么要自动装：首版把安装完全押在首屏那个按钮上（且跑在 Compose 的
+     * rememberCoroutineScope 里），一旦这条路径失效，用户看到的就是「点了没反应」，
+     * 而 APP 自己什么也不会做。环境自举本来就是本 APP 的职责，不该依赖一次点击。
+     * 安装全过程有前台通知 + 首屏进度卡，用户随时可感知。
+     */
     private fun maybeAutoStartBackend() {
-        if (!ProrootEnv.isInstalled(this)) return
+        if (!ProrootEnv.isInstalled(this)) {
+            Log.i(TAG, "环境未安装，自动开始引导安装")
+            try {
+                DshService.requestInstallAndStart(this)
+            } catch (t: Throwable) {
+                Log.w(TAG, "auto install failed: $t")
+            }
+            return
+        }
         try {
             DshService.requestStart(this)
         } catch (t: Throwable) {

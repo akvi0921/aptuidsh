@@ -12,6 +12,8 @@
     <!-- 前台服务:挂住内置 dsh 后端进程不被系统回收 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- 安装/启动期间持有 PARTIAL_WAKE_LOCK:屏幕熄灭后 CPU 仍要跑完 585MB 解压 -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- Android 13+ 通知权限(前台服务通知) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- 附件存储:写入 /storage/emulated/0/APTUIDSH/ 公共目录(Android 11+ 需"所有文件访问") -->
