@@ -770,48 +770,127 @@ public class DshClient {
         respond(value, null, cb);
     }
 
-    /** respond：向 /api/respond 提交应答载荷（审批/提问共用），回执 accepted 经 onResult(value) 返回。
-     *  @param rpcId 复用的 rpcId（审批场景必须传入 mux 帧的 rpcId，否则后端 not-pending）；
-     *               null 则自动生成新 UUID。 */
+    /**
+     * respond：提交审批 / 提问的应答。
+     *
+     * <p><b>协议变更</b>：dsh ≤ 0.1.1 走 {@code POST /api/respond} 的 {@code client-response}
+     * 信封；dsh ≥ 0.1.5 该端点已 404，回执改由事件通道完成——
+     * {@code POST /api/$events/result}，体为
+     * {@code {args:{clientId, eventId, outcome:{kind:"result", value:…}}}}。
+     * 其中 {@code clientId} 来自 {@code $events} 流的 ready 帧（见
+     * {@link WaterfallRegistry}），{@code eventId} 就是待应答 waterfall 帧的 eventId
+     * ——也就是旧 UI 里那个「mux 帧的 rpcId」。
+     *
+     * @param rpcId 待应答 waterfall 帧的 eventId（旧称 rpcId）；为 null 时从 value 里取
+     */
     public void respond(final JSONObject value, final String rpcId, final DshCallback cb) {
-        final JSONObject body = new JSONObject();
-        try {
-            body.put("type", "client-response");
-            body.put("rpcId", rpcId != null ? rpcId : UUID.randomUUID().toString());
-            body.put("result", new JSONObject().put("ok", true).put("value", value == null ? new JSONObject() : value));
-        } catch (JSONException e) {
-            throw new IllegalArgumentException("respond: build envelope failed", e);
-        }
         final DshCallback sink = cb != null ? cb : NOOP_CALLBACK;
+        final JSONObject v = value == null ? new JSONObject() : value;
         executor.execute(new Runnable() {
             @Override
             public void run() {
                 try {
-                    JSONObject receipt = httpRespond(body);
-                    if (receipt == null) {
-                        sink.onError(ERR_BAD_RESPONSE, "empty respond receipt", new JSONObject());
+                    String eventId = rpcId;
+                    if (eventId == null || eventId.isEmpty()) {
+                        eventId = v.optString("rpcId", "");
+                    }
+                    // 兜底：按会话找最近一条待应答的提问事件
+                    if ((eventId == null || eventId.isEmpty()) && v.has("answers")) {
+                        eventId = WaterfallRegistry.findEventId(
+                                "user-questions/request", v.optString("sessionId", ""));
+                    }
+                    if (eventId == null || eventId.isEmpty()) {
+                        sink.onError(ERR_SERVER, "找不到对应的待应答事件（eventId 缺失）", new JSONObject());
                         return;
                     }
-                    if (receipt.optBoolean("accepted", false)) {
-                        sink.onResult(receipt);
+                    String clientId = WaterfallRegistry.clientId();
+                    if (clientId == null || clientId.isEmpty()) {
+                        sink.onError(ERR_SERVER, "事件通道尚未就绪（缺 clientId），请稍后重试", new JSONObject());
+                        return;
+                    }
+
+                    JSONObject outcome = new JSONObject();
+                    outcome.put("kind", "result");
+                    outcome.put("value", mapRespondValue(v));
+
+                    JSONObject args = new JSONObject();
+                    args.put("clientId", clientId);
+                    args.put("eventId", eventId);
+                    args.put("outcome", outcome);
+
+                    JSONObject wrapped = new JSONObject();
+                    wrapped.put("args", args);
+                    JSONObject envelope = postApi("$events/result", wrapped, true);
+                    if (envelope == null) {
+                        if (com.aptuidsh.kui.env.DshAuth.reauth()) {
+                            envelope = postApi("$events/result", wrapped, true);
+                        }
+                    }
+                    if (envelope == null) {
+                        sink.onError(ERR_NETWORK, "应答提交失败（鉴权或网络）", new JSONObject());
+                        return;
+                    }
+                    if (envelope.optBoolean("ok", false)) {
+                        WaterfallRegistry.resolve(eventId);
+                        sink.onResult(envelope);
                     } else {
+                        JSONObject err = envelope.optJSONObject("error");
                         JSONObject details = new JSONObject();
+                        String reason = err == null ? "unknown" : err.optString("message", "unknown");
                         try {
-                            details.put("reason", receipt.optString("reason", "not-pending"));
+                            details.put("reason", reason);
                         } catch (JSONException ignored) {
                         }
-                        sink.onError(ERR_SERVER, "应答被拒绝: " + receipt.optString("reason", "not-pending"), details);
+                        sink.onError(ERR_SERVER, "应答被拒绝: " + reason, details);
                     }
                 } catch (IOException e) {
-                    JSONObject details = new JSONObject();
-                    sink.onError(ERR_NETWORK, e.getMessage() != null ? e.getMessage() : "respond io error", details);
+                    sink.onError(ERR_NETWORK, e.getMessage() != null ? e.getMessage() : "respond io error",
+                            new JSONObject());
                 } catch (JSONException e) {
                     sink.onError(ERR_BAD_RESPONSE, "malformed respond receipt", new JSONObject());
                 } catch (Exception e) {
-                    sink.onError(ERR_NETWORK, e.getClass().getSimpleName() + ": " + e.getMessage(), new JSONObject());
+                    sink.onError(ERR_NETWORK, e.getClass().getSimpleName() + ": " + e.getMessage(),
+                            new JSONObject());
                 }
             }
         });
+    }
+
+    /**
+     * 把旧式应答载荷映射为新网关 outcome 的 value。
+     *
+     * <ul>
+     *   <li>提问：旧 {@code {sessionId, answers:[{id,selected,custom?}]}} →
+     *       新 value 直接就是 {@code {answers:[…]}}（<b>同一形状</b>，见
+     *       {@code AskUserQuestionAnswer}）。</li>
+     *   <li>审批：旧 {@code {sessionId, approvalId, outcome:"approved"|"rejected"}} →
+     *       新 value 是闭集字符串 {@code allowed-once|rejected|cancelled}
+     *       （见 {@code ApprovalOutcome}），这里做取值归一。</li>
+     * </ul>
+     */
+    private static Object mapRespondValue(JSONObject value) throws JSONException {
+        if (value.has("answers")) {
+            JSONObject out = new JSONObject();
+            out.put("answers", value.optJSONArray("answers") == null
+                    ? new org.json.JSONArray() : value.optJSONArray("answers"));
+            return out;
+        }
+        if (value.has("outcome")) {
+            String raw = value.optString("outcome", "").toLowerCase(java.util.Locale.ROOT);
+            String normalized;
+            if (raw.startsWith("allow") || "approved".equals(raw) || "approve".equals(raw)
+                    || "yes".equals(raw) || "once".equals(raw)) {
+                normalized = "allowed-once";
+            } else if (raw.startsWith("cancel")) {
+                normalized = "cancelled";
+            } else if (raw.isEmpty() || "unavailable".equals(raw)) {
+                normalized = "unavailable";
+            } else {
+                normalized = "rejected";
+            }
+            return normalized;
+        }
+        return value;
     }
 
     /** 审批应答：允许一次 / 拒绝（outcome ∈ allowed-once|rejected）。
@@ -930,6 +1009,11 @@ public class DshClient {
      * <p>{@code host.describe} 在新版已被移除，由 {@link #syntheticHostDescribe()} 本地合成。
      */
     private JSONObject httpRpcPath(String path, JSONObject payload) throws IOException, JSONException {
+        // session.history 在新版被 session/page 取代，而后者要求 throughSeq 不得超过会话游标，
+        // 因此改为「开一条短命 follow 流取 opening snapshot」，见 syntheticSessionHistory。
+        if ("session.history".equals(path)) {
+            return syntheticSessionHistory(payload == null ? "" : payload.optString("sessionId", ""));
+        }
         String mapped = ApiCompat.mapMethod(path);
         if (ApiCompat.isSynthetic(mapped)) {
             return syntheticHostDescribe();
