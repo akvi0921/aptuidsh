@@ -171,10 +171,13 @@ public final class RootfsInstaller {
 
     private static void runTarExtract(File archive, File root, Progress progress) throws IOException {
         // 与 Termux 端验证过的调用方式完全一致：工作目录设为 rootfs，解压归档到当前目录
-        EnvLog.i("执行解压: /system/bin/tar -xJf " + archive.getAbsolutePath()
+        // 必须用 gzip(-z)：Android 的 toybox tar 对 xz(-J) 是靠 exec 外部 xz 实现的，
+        // 而系统里没有 xz —— 会报 "tar: exec xz: No such file or directory"，
+        // 而且 toybox 在这种情况下**仍然返回退出码 0**。gzip 是 toybox 内置实现，零外部依赖。
+        EnvLog.i("执行解压: /system/bin/tar -xzf " + archive.getAbsolutePath()
                 + " (cwd=" + root.getAbsolutePath() + ")");
         ProcessBuilder pb = new ProcessBuilder(
-                "/system/bin/tar", "-xJf", archive.getAbsolutePath());
+                "/system/bin/tar", "-xzf", archive.getAbsolutePath());
         pb.directory(root);
         pb.redirectErrorStream(true);
         Process p;
@@ -221,10 +224,16 @@ public final class RootfsInstaller {
             p.destroy();
             throw new IOException("解压被中断");
         }
-        EnvLog.i("tar 退出码=" + code + (tail.length() > 0 ? "，输出：" + tail.toString().trim() : ""));
-        if (code != 0) {
+        String tarOut = tail.toString();
+        EnvLog.i("tar 退出码=" + code + (tarOut.isEmpty() ? "" : "，输出：" + tarOut.trim()));
+        // toybox 在"解压器缺失"这类失败上会返回 0，因此不能只看退出码，必须看输出
+        boolean tarReportedError = tarOut.contains("tar: ");
+        if (tarReportedError) {
+            EnvLog.e("tar 报告了错误（退出码却是 " + code + "）：" + tarOut.trim(), null);
+        }
+        if (code != 0 || tarReportedError) {
             throw new IOException("解压 rootfs 失败 (tar exit=" + code + ")"
-                    + (tail.length() > 0 ? "\n" + tail : ""));
+                    + (tarOut.isEmpty() ? "" : "\n" + tarOut));
         }
     }
 

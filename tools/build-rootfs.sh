@@ -12,7 +12,7 @@
 #   bash tools/build-rootfs.sh [工作目录] [dsh版本]
 #   例：bash tools/build-rootfs.sh ~/aptuidsh-rootfs 0.1.5-rc.1
 #
-# 产物：<工作目录>/dist/rootfs.tar.xz  → 复制到 app/src/main/assets/rootfs.tar.xz
+# 产物：<工作目录>/dist/rootfs.tar.gz  → 复制到 app/src/main/assets/rootfs.tar.gz
 #
 # -----------------------------------------------------------------------------
 # 踩过的坑（改动本脚本前务必先读）：
@@ -150,10 +150,10 @@ proroot=arm64-v8a
 EOF
 
 # ------------------------------------------------------------------- 7/7 打包
-info "7/7 打包 rootfs.tar.xz（--hard-dereference：Android 不支持硬链接）"
-rm -f dist/rootfs.tar.xz
-( cd rootfs && tar --hard-dereference --numeric-owner -cJf "$WORK/dist/rootfs.tar.xz" . )
+info "7/7 打包 rootfs.tar.gz（--hard-dereference：Android 不支持硬链接）"
+rm -f dist/rootfs.tar.gz
+( cd rootfs && tar --hard-dereference --numeric-owner -cJf "$WORK/dist/rootfs.tar.gz" . )
 
-ok "镜像构建完成：$WORK/dist/rootfs.tar.xz（$(du -h "$WORK/dist/rootfs.tar.xz" | cut -f1)）"
-ok "复制到项目：cp $WORK/dist/rootfs.tar.xz $PROJ_DIR/app/src/main/assets/rootfs.tar.xz"
+ok "镜像构建完成：$WORK/dist/rootfs.tar.gz（$(du -h "$WORK/dist/rootfs.tar.gz" | cut -f1)）"
+ok "复制到项目：cp $WORK/dist/rootfs.tar.gz $PROJ_DIR/app/src/main/assets/rootfs.tar.gz"
 ok "同步 proroot 二进制：cp $WORK/proroot/*.so $PROJ_DIR/app/src/main/jniLibs/arm64-v8a/"

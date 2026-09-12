@@ -1,7 +1,7 @@
 // ===== app 模块构建脚本:APTUIDSH 客户端(Kotlin + Jetpack Compose,协议层为纯 Java) =====
 // 本 APK 除前端界面外还内置一整套 rootless Linux 运行环境:
 //   jniLibs/arm64-v8a/libproroot*.so  ← proroot 启动器与运行时(5 个 .so)
-//   assets/rootfs.tar.xz              ← Ubuntu 24.04 + Node.js 22 + dsh 本体(约 78MB)
+//   assets/rootfs.tar.gz              ← Ubuntu 24.04 + Node.js 22 + dsh 本体(约 137MB)
 // 因此必须开启 useLegacyPackaging:让 .so 在安装时真正解包到 nativeLibraryDir,
 // 这是 Android 10+ 唯一允许 exec 的目录,proroot 启动器必须从那里执行。
 plugins {
@@ -18,8 +18,8 @@ android {
         applicationId "com.aptuidsh.kui"
         minSdk 24
         targetSdk 34
-        versionCode 7
-        versionName "1.0.6"
+        versionCode 8
+        versionName "1.1.0"
 
         // proroot 只提供 arm64-v8a 运行时
         ndk {

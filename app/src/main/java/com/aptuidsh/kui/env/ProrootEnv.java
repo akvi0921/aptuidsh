@@ -49,7 +49,7 @@ public final class ProrootEnv {
     public static final String BASE_URL = "http://" + DSH_HOST + ":" + DSH_PORT;
 
     /** 打包进 assets 的 rootfs 镜像文件名。 */
-    public static final String ROOTFS_ASSET = "rootfs.tar.xz";
+    public static final String ROOTFS_ASSET = "rootfs.tar.gz";
     /** 镜像自带的版本标记文件（相对 rootfs 根）。 */
     public static final String IMAGE_MARKER = ".aptuidsh-image";
     /** 安装完成标记（放在 rootfs 之外，避免被镜像覆盖）。 */
