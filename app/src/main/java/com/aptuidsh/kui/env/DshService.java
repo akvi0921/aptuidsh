@@ -86,8 +86,14 @@ public class DshService extends Service {
         super.onCreate();
         EnvLog.attach(getApplicationContext());
         createChannel();
-        // 必须先转前台，否则长时间安装在后台会被系统判定为 ANR/被杀
-        startForegroundCompat("内置 dsh 启动中…");
+        // 必须先转前台，否则长时间安装在后台会被系统判定为 ANR/被杀。
+        // 但 startForeground 在某些 ROM / 权限状态下会抛异常——这里绝不能让它把服务打死，
+        // 否则界面表现就是「点了没反应」。
+        try {
+            startForegroundCompat("内置 dsh 启动中…");
+        } catch (Throwable t) {
+            EnvLog.e("startForeground 失败（服务仍会继续执行后台任务）", t);
+        }
         DshAuth.restore(this);
         EnvLog.i("DshService 已创建");
     }
