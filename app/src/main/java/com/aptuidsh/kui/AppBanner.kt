@@ -22,7 +22,9 @@ object AppBanner {
     fun show(ctx: Context, text: String) {
         val activity = ctx as? Activity
         if (activity == null || activity.isFinishing) {
-            Toast.makeText(ctx, text, Toast.LENGTH_SHORT).show()
+            // Toast 必须在主线程：本方法常被 RPC 回调调用（后台线程），
+            // 直接 show() 会抛 "Can't toast on a thread that has not called Looper.prepare()"
+            handler.post { Toast.makeText(ctx.applicationContext, text, Toast.LENGTH_SHORT).show() }
             return
         }
         handler.post { attach(activity, text) }

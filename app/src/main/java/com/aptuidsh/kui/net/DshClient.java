@@ -56,6 +56,30 @@ public class DshClient {
     /** 服务端 result.ok=false 且 error.code 不是整数（details.rawCode 存原始字符串 code）。 */
     public static final int ERR_SERVER = -4;
 
+    /**
+     * 回调统一投递到主线程。
+     *
+     * <p><b>为什么必须这么做</b>：RPC 在 {@code dsh-rpc} 线程池执行，而绝大多数回调体都是
+     * UI 代码——更新 Compose 状态、弹 Toast、收起弹窗。其中 {@code Toast} 尤其致命：
+     * 在非主线程调用会抛
+     * {@code RuntimeException: Can't toast on a thread that has not called Looper.prepare()}，
+     * 直接把进程打死（真机实测：点「添加工作区 → 打开」即崩溃重启）。
+     * 全项目曾有 9 处 Toast 位于 RPC 回调内，集中在一点修复比逐个改调用点可靠得多。
+     *
+     * <p>安全性：所有调用方要么是 Compose UI，要么是
+     * {@code suspendCancellableCoroutine}（非阻塞等待），因此主线程投递不会造成死锁。
+     */
+    private static final android.os.Handler MAIN =
+            new android.os.Handler(android.os.Looper.getMainLooper());
+
+    private static void deliver(Runnable r) {
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            r.run();
+        } else {
+            MAIN.post(r);
+        }
+    }
+
     private static final String DEFAULT_BASE_URL = "http://127.0.0.1:3081";
     private static final int DEFAULT_TIMEOUT_MS = 10_000;
     private static final int MAX_BODY_BYTES = 64 * 1024 * 1024; // 响应体读取上限，防 OOM
@@ -184,9 +208,23 @@ public class DshClient {
 
                 }
                 if (value != null) {
-                    sink.onResult(value);
+                    final JSONObject okValue = value;
+                    deliver(new Runnable() {
+                        @Override
+                        public void run() {
+                            sink.onResult(okValue);
+                        }
+                    });
                 } else {
-                    sink.onError(errCode, errMsg != null ? errMsg : "unknown error", errDetails);
+                    final int ec = errCode;
+                    final String em = errMsg != null ? errMsg : "unknown error";
+                    final JSONObject ed = errDetails;
+                    deliver(new Runnable() {
+                        @Override
+                        public void run() {
+                            sink.onError(ec, em, ed);
+                        }
+                    });
                 }
             }
         });
@@ -832,7 +870,13 @@ public class DshClient {
                     }
                     if (envelope.optBoolean("ok", false)) {
                         WaterfallRegistry.resolve(eventId);
-                        sink.onResult(envelope);
+                        final JSONObject okEnv = envelope;
+                        deliver(new Runnable() {
+                            @Override
+                            public void run() {
+                                sink.onResult(okEnv);
+                            }
+                        });
                     } else {
                         JSONObject err = envelope.optJSONObject("error");
                         JSONObject details = new JSONObject();
@@ -1377,9 +1421,23 @@ public class DshClient {
                     errDetails = new JSONObject();
                 }
                 if (value != null) {
-                    sink.onResult(value);
+                    final JSONObject okValue = value;
+                    deliver(new Runnable() {
+                        @Override
+                        public void run() {
+                            sink.onResult(okValue);
+                        }
+                    });
                 } else {
-                    sink.onError(errCode, errMsg != null ? errMsg : "unknown error", errDetails);
+                    final int ec = errCode;
+                    final String em = errMsg != null ? errMsg : "unknown error";
+                    final JSONObject ed = errDetails;
+                    deliver(new Runnable() {
+                        @Override
+                        public void run() {
+                            sink.onError(ec, em, ed);
+                        }
+                    });
                 }
             }
         });
