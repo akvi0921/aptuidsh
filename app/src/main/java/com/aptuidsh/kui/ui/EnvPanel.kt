@@ -39,6 +39,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.aptuidsh.kui.env.DshBackend
+import com.aptuidsh.kui.env.EnvLog
 import com.aptuidsh.kui.env.DshService
 import com.aptuidsh.kui.env.ProrootEnv
 import com.aptuidsh.kui.env.RootfsInstaller
@@ -165,12 +166,9 @@ fun EnvControlCard(
                         enabled = !busy,
                         onClick = {
                             busy = true
-                            scope.launch {
-                                withContext(Dispatchers.IO) { backend.install(context) }
-                                withContext(Dispatchers.IO) { backend.start(context) }
-                                DshService.requestStart(context)
-                                busy = false
-                            }
+                            // 交给前台服务执行：服务有自己的 worker 线程，
+                            // 不受界面协程作用域影响，且全程写 EnvLog
+                            DshService.requestInstallAndStart(context)
                         },
                     ) { Text("安装并启动") }
                 } else if (status.phase == DshBackend.Phase.RUNNING) {
@@ -178,20 +176,14 @@ fun EnvControlCard(
                         enabled = !busy,
                         onClick = {
                             busy = true
-                            scope.launch {
-                                withContext(Dispatchers.IO) { backend.stop(context) }
-                                busy = false
-                            }
+                            DshService.requestStop(context)
                         },
                     ) { Text("停止") }
                     OutlinedButton(
                         enabled = !busy,
                         onClick = {
                             busy = true
-                            scope.launch {
-                                withContext(Dispatchers.IO) { backend.restart(context) }
-                                busy = false
-                            }
+                            DshService.requestRestart(context)
                         },
                     ) { Text("重启") }
                 } else {
@@ -199,10 +191,7 @@ fun EnvControlCard(
                         enabled = !busy,
                         onClick = {
                             busy = true
-                            scope.launch {
-                                withContext(Dispatchers.IO) { backend.start(context) }
-                                busy = false
-                            }
+                            DshService.requestStart(context)
                         },
                     ) { Text("启动后端") }
                 }
@@ -250,14 +239,14 @@ fun EnvConsoleScreen(onBack: () -> Unit) {
     val backend = remember { DshBackend.get() }
 
     var status by remember { mutableStateOf(backend.status(context)) }
-    var logs by remember { mutableStateOf(backend.recentLog().toList()) }
+    var logs by remember { mutableStateOf(EnvLog.lines()) }
     var busy by remember { mutableStateOf(false) }
     var smokeResult by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) {
         while (true) {
             status = backend.status(context)
-            logs = backend.recentLog().toList()
+            logs = EnvLog.lines()
             delay(900)
         }
     }
@@ -268,11 +257,18 @@ fun EnvConsoleScreen(onBack: () -> Unit) {
             }
 
             override fun onLogLine(line: String) {
-                logs = backend.recentLog().toList()
+                logs = EnvLog.lines()
             }
         }
         backend.addListener(listener)
-        onDispose { backend.removeListener(listener) }
+        // EnvLog 是全过程日志（安装阶段 + 后端输出 + 异常栈），
+        // 首版只看后端进程输出，导致「安装阶段出问题时控制台一片空白」
+        val sink = EnvLog.Sink { logs = EnvLog.lines() }
+        EnvLog.addSink(sink)
+        onDispose {
+            backend.removeListener(listener)
+            EnvLog.removeSink(sink)
+        }
     }
 
     Column(
@@ -308,31 +304,21 @@ fun EnvConsoleScreen(onBack: () -> Unit) {
                         enabled = !busy,
                         onClick = {
                             busy = true
-                            scope.launch {
-                                withContext(Dispatchers.IO) { backend.start(context) }
-                                DshService.requestStart(context)
-                                busy = false
-                            }
+                            DshService.requestStart(context)
                         },
                     ) { Text("启动") }
                     OutlinedButton(
                         enabled = !busy,
                         onClick = {
                             busy = true
-                            scope.launch {
-                                withContext(Dispatchers.IO) { backend.stop(context) }
-                                busy = false
-                            }
+                            DshService.requestStop(context)
                         },
                     ) { Text("停止") }
                     OutlinedButton(
                         enabled = !busy,
                         onClick = {
                             busy = true
-                            scope.launch {
-                                withContext(Dispatchers.IO) { backend.restart(context) }
-                                busy = false
-                            }
+                            DshService.requestRestart(context)
                         },
                     ) { Text("重启") }
                 }
@@ -361,24 +347,32 @@ fun EnvConsoleScreen(onBack: () -> Unit) {
                         enabled = !busy,
                         onClick = {
                             busy = true
-                            scope.launch {
-                                withContext(Dispatchers.IO) {
-                                    backend.stop(context)
+                            Thread {
+                                try {
+                                    EnvLog.i("== 重装环境 ==")
+                                    DshBackend.get().stop(context)
                                     RootfsInstaller.uninstall(context)
-                                    backend.install(context)
-                                    backend.start(context)
+                                } catch (t: Throwable) {
+                                    EnvLog.e("卸载旧环境失败", t)
                                 }
-                                busy = false
-                            }
+                                DshService.requestInstallAndStart(context)
+                            }.start()
                         },
                     ) { Text("重装环境") }
                     OutlinedButton(
                         enabled = !busy,
                         onClick = {
-                            scope.launch {
-                                withContext(Dispatchers.IO) { RootfsInstaller.uninstall(context) }
+                            busy = true
+                            Thread {
+                                try {
+                                    DshBackend.get().stop(context)
+                                    RootfsInstaller.uninstall(context)
+                                    EnvLog.i("环境已卸载")
+                                } catch (t: Throwable) {
+                                    EnvLog.e("卸载失败", t)
+                                }
                                 busy = false
-                            }
+                            }.start()
                         },
                     ) { Text("卸载环境") }
                 }
@@ -395,7 +389,7 @@ fun EnvConsoleScreen(onBack: () -> Unit) {
         }
         Spacer(Modifier.height(12.dp))
         Text(
-            text = "运行日志（proroot / dsh 原始输出）",
+            text = "全过程日志（安装阶段 / proroot / dsh / 异常栈）",
             style = MaterialTheme.typography.labelLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -411,7 +405,7 @@ fun EnvConsoleScreen(onBack: () -> Unit) {
                     .padding(10.dp)
                     .verticalScroll(rememberScrollState()),
             ) {
-                val text = logs.takeLast(240).joinToString("\n")
+                val text = logs.takeLast(400).joinToString("\n")
                 Text(
                     text = text.ifEmpty { "（暂无输出）" },
                     style = MaterialTheme.typography.labelSmall,

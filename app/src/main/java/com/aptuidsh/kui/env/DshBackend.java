@@ -163,6 +163,13 @@ public final class DshBackend {
         publish(ctx);
     }
 
+    /** 由服务层在后台任务失败时调用，把错误暴露到界面上（此时不在主线程，不能直接 publish）。 */
+    public void reportError(String msg) {
+        message = msg == null ? "未知错误" : msg;
+        phase = Phase.ERROR;
+        EnvLog.e(msg, null);
+    }
+
     /** 最近若干行后端输出（用于日志面板）。 */
     public List<String> recentLog() {
         synchronized (logRing) {
@@ -174,6 +181,17 @@ public final class DshBackend {
 
     /** 安装内置 rootfs（阻塞，后台线程调用）。 */
     public boolean install(Context ctx) {
+        try {
+            return installInner(ctx);
+        } catch (Throwable t) {
+            EnvLog.e("环境安装出现未预期异常", t);
+            setPhase(ctx, Phase.ERROR, "环境安装异常：" + t);
+            return false;
+        }
+    }
+
+    private boolean installInner(Context ctx) {
+        EnvLog.i("== install() 进入 ==");
         if (ProrootEnv.isInstalled(ctx)) {
             setPhase(ctx, Phase.STOPPED, "环境已就绪");
             return true;
@@ -182,6 +200,7 @@ public final class DshBackend {
         // 解压 585MB 之前先确认启动器能跑：Android 10+ 只允许 exec nativeLibraryDir 里的文件，
         // 一旦这条不成立，装完也是白装。
         ProrootEnv.Smoke launcherSmoke = ProrootEnv.smokeTestLauncher(ctx);
+        EnvLog.i("启动器自检: ok=" + launcherSmoke.ok + " " + launcherSmoke.summary);
         if (!launcherSmoke.ok) {
             setPhase(ctx, Phase.ERROR, "无法执行内置 proroot 启动器：" + launcherSmoke.summary
                     + (launcherSmoke.output.isEmpty() ? "" : "\n" + launcherSmoke.output));
@@ -202,11 +221,12 @@ public final class DshBackend {
                 });
             });
             progressPercent = -1;
+            EnvLog.i("== install() 成功返回 ==");
             setPhase(ctx, Phase.STOPPED, "环境安装完成");
             return true;
-        } catch (IOException e) {
+        } catch (Throwable e) {
             progressPercent = -1;
-            Log.e(TAG, "install failed", e);
+            EnvLog.e("环境安装失败", e);
             setPhase(ctx, Phase.ERROR, "环境安装失败：" + e.getMessage());
             return false;
         }
@@ -219,8 +239,20 @@ public final class DshBackend {
      * 阻塞，请在后台线程调用。
      */
     public boolean start(Context ctx) {
+        try {
+            return startInner(ctx);
+        } catch (Throwable t) {
+            EnvLog.e("启动后端出现未预期异常", t);
+            setPhase(ctx, Phase.ERROR, "启动异常：" + t);
+            return false;
+        }
+    }
+
+    private boolean startInner(Context ctx) {
+        EnvLog.i("== start() 进入 ==");
         synchronized (lock) {
             if (!ProrootEnv.isInstalled(ctx)) {
+                EnvLog.w("start() 中止：尚未安装内置环境");
                 setPhase(ctx, Phase.NOT_INSTALLED, "尚未安装内置环境");
                 return false;
             }
@@ -234,6 +266,7 @@ public final class DshBackend {
             // 否则用户只会看到一个语焉不详的启动超时。
             if (!guestVerified) {
                 ProrootEnv.Smoke smoke = ProrootEnv.smokeTestGuest(ctx);
+                EnvLog.i("guest 自检: ok=" + smoke.ok + " " + smoke.summary);
                 if (!smoke.ok) {
                     setPhase(ctx, Phase.ERROR, "自检未通过：" + smoke.summary);
                     return false;
@@ -261,8 +294,8 @@ public final class DshBackend {
             ProrootEnv.syncResolvConf(ctx);
             try {
                 launchProcess(ctx);
-            } catch (IOException e) {
-                Log.e(TAG, "launch failed", e);
+            } catch (Throwable e) {
+                EnvLog.e("launchProcess 失败", e);
                 setPhase(ctx, Phase.ERROR, "启动失败：" + e.getMessage());
                 return false;
             }
@@ -288,9 +321,11 @@ public final class DshBackend {
             }
             portAlive = up;
             if (!up) {
+                EnvLog.e("启动超时：90 秒内 3081 未就绪", null);
                 setPhase(ctx, Phase.ERROR, "启动超时（90 秒内端口未就绪），请查看运行日志");
                 return false;
             }
+            EnvLog.i("端口 3081 已就绪");
 
             // 端口通了之后再等 launchToken（stdout 一般先于端口就绪打印，稳妥起见重试）
             boolean authed = false;
@@ -303,6 +338,7 @@ public final class DshBackend {
                 }
                 sleep(500);
             }
+            EnvLog.i("鉴权交换: ok=" + authed);
             setPhase(ctx, authed ? Phase.RUNNING : Phase.RUNNING,
                     authed ? "内置 dsh 已就绪 · 端口 " + ProrootEnv.DSH_PORT
                             : "dsh 已启动，但鉴权交换未完成（部分功能可能不可用）");
@@ -349,7 +385,17 @@ public final class DshBackend {
         pb.directory(rootfs);
 
         clearLogFile(ctx);
-        Process p = pb.start();
+        EnvLog.i("exec: " + launcher + " -r " + rootfs.getAbsolutePath()
+                + " -b " + ProrootEnv.HOST_SDCARD + ":" + ProrootEnv.GUEST_SDCARD
+                + " -0 --link2symlink -w " + ProrootEnv.GUEST_HOME);
+        Process p;
+        try {
+            p = pb.start();
+        } catch (Throwable t) {
+            EnvLog.e("proroot 启动器 exec 失败（EACCES 通常意味着 Android 沙箱禁止执行该路径）", t);
+            throw t;
+        }
+        EnvLog.i("proroot 已启动");
         process = p;
         pid = -1L;
 
@@ -367,6 +413,7 @@ public final class DshBackend {
                 Thread.currentThread().interrupt();
                 return;
             }
+            EnvLog.w("dsh 后端进程退出，exit=" + code + "（stopRequested=" + stopRequested + "）");
             if (stopRequested) return;
             portAlive = false;
             if (phase == Phase.STARTING || phase == Phase.RUNNING) {
@@ -383,7 +430,7 @@ public final class DshBackend {
             if (pid >= 0) break;
             sleep(150);
         }
-        Log.i(TAG, "proroot launched, guest pid=" + pid);
+        EnvLog.i("guest pid=" + pid + (pid < 0 ? "（未能读取 PID 文件，停止时可能较慢）" : ""));
     }
 
     /** 组装 guest 内启动脚本。 */
@@ -409,6 +456,16 @@ public final class DshBackend {
 
     /** 停止后端。阻塞，后台线程调用。 */
     public void stop(Context ctx) {
+        try {
+            stopInner(ctx);
+        } catch (Throwable t) {
+            EnvLog.e("停止后端出现未预期异常", t);
+            setPhase(ctx, Phase.STOPPED, "停止异常：" + t);
+        }
+    }
+
+    private void stopInner(Context ctx) {
+        EnvLog.i("== stop() 进入 ==");
         synchronized (lock) {
             stopRequested = true;
             setPhase(ctx, Phase.STOPPING, "正在停止内置 dsh…");
@@ -567,6 +624,7 @@ public final class DshBackend {
                 if (m.find()) {
                     DshAuth.setLaunchToken(ctx, m.group(1));
                 }
+                EnvLog.i("[dsh] " + line);
                 for (Listener l : listeners) {
                     try {
                         l.onLogLine(line);

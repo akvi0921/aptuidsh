@@ -229,9 +229,13 @@ public final class ProrootEnv {
     public static Smoke smokeTestLauncher(Context ctx) {
         File launcher = new File(launcherPath(ctx));
         if (!launcher.exists()) {
+            EnvLog.e("启动器不存在: " + launcher, null);
             return new Smoke(false, "缺少启动器 " + launcher.getAbsolutePath(), "");
         }
+        EnvLog.i("启动器: " + launcher + "，可读=" + launcher.canRead()
+                + " 可执行=" + launcher.canExecute() + " 大小=" + launcher.length());
         if (!launcher.canExecute()) {
+            EnvLog.e("启动器不可执行（Android 10+ 必须从 nativeLibraryDir 执行）: " + launcher, null);
             return new Smoke(false, "启动器不可执行（权限位未置位）: " + launcher, "");
         }
         return runCaptured(new String[]{launcher.getAbsolutePath()}, null, 12_000L,
@@ -245,6 +249,7 @@ public final class ProrootEnv {
      */
     public static Smoke smokeTestGuest(Context ctx) {
         if (!isInstalled(ctx)) {
+            EnvLog.w("guest 自检跳过：尚未安装");
             return new Smoke(false, "尚未安装内置环境", "");
         }
         File launcher = new File(launcherPath(ctx));
@@ -294,9 +299,27 @@ public final class ProrootEnv {
             reader.setDaemon(true);
             reader.start();
 
-            boolean finished = p.waitFor(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+            // 注意：Process.waitFor(long, TimeUnit) 需要 API 26，而本 APP 的 minSdk 是 24，
+            // 因此这里用轮询实现，避免在旧设备上 NoSuchMethodError。
+            long deadline = System.currentTimeMillis() + timeoutMs;
+            while (System.currentTimeMillis() < deadline) {
+                try {
+                    p.exitValue();
+                    break;
+                } catch (IllegalThreadStateException stillRunning) {
+                    Thread.sleep(120);
+                }
+            }
+            boolean finished;
+            try {
+                p.exitValue();
+                finished = true;
+            } catch (IllegalThreadStateException stillRunning) {
+                finished = false;
+            }
             if (!finished) {
                 p.destroyForcibly();
+                EnvLog.w("启动器超时无响应: " + java.util.Arrays.toString(cmd));
                 return new Smoke(false, "启动器超时无响应（被系统拦截？）", sb.toString());
             }
             reader.join(1500);

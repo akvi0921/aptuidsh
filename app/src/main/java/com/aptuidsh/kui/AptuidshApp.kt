@@ -24,11 +24,77 @@ class AptuidshApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        installCrashHandler()
+        com.aptuidsh.kui.env.EnvLog.attach(this)
+        com.aptuidsh.kui.env.EnvLog.i("APP 启动（pid=${android.os.Process.myPid()}）")
         DshAuth.init(this)
         ApiCompat.setDshVersion(readDshVersion())
         syncGuestResolvConf()
         maybeAutoStartBackend()
     }
+
+    /**
+     * 全局崩溃捕获：把堆栈写到**用户可读**的位置，否则真机上的崩溃完全无从定位。
+     *
+     * <p>写两处：
+     * <ul>
+     *   <li>{@code getExternalFilesDir()} —— 无需任何权限，文件管理器可访问
+     *       （Android/data/com.aptuidsh.kui/files/）；</li>
+     *   <li>{@code /sdcard/APTUIDSH/crash.txt} —— 已授予「所有文件访问」时更易取。</li>
+     * </ul>
+     * 记录后仍然交回默认处理器，保证系统行为不变（用户照样看到「应用已停止」）。
+     */
+    private fun installCrashHandler() {
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+            try {
+                val sw = java.io.StringWriter()
+                error.printStackTrace(java.io.PrintWriter(sw))
+                val text = buildString {
+                    append("APTUIDSH 崩溃报告\n")
+                    append("时间: ").append(java.util.Date()).append('\n')
+                    append("线程: ").append(thread.name).append('\n')
+                    append("版本: ").append(versionName).append('\n')
+                    append("设备: ").append(android.os.Build.MANUFACTURER).append(' ')
+                    append(android.os.Build.MODEL).append(" / Android ")
+                    append(android.os.Build.VERSION.RELEASE)
+                    append(" (API ").append(android.os.Build.VERSION.SDK_INT).append(")\n\n")
+                    append(sw.toString())
+                }
+                writeCrash(text)
+            } catch (t: Throwable) {
+                Log.e(TAG, "写崩溃报告失败", t)
+            }
+            previous?.uncaughtException(thread, error)
+        }
+    }
+
+    private fun writeCrash(text: String) {
+        val targets = mutableListOf<java.io.File>()
+        getExternalFilesDir(null)?.let { targets.add(java.io.File(it, "crash.txt")) }
+        try {
+            val shared = java.io.File("/sdcard/APTUIDSH")
+            if (shared.isDirectory || shared.mkdirs()) {
+                targets.add(java.io.File(shared, "crash.txt"))
+            }
+        } catch (ignored: Throwable) {
+        }
+        for (f in targets) {
+            try {
+                f.writeText(text)
+                Log.e(TAG, "崩溃报告已写入 " + f.absolutePath)
+            } catch (t: Throwable) {
+                Log.e(TAG, "写入失败 " + f, t)
+            }
+        }
+    }
+
+    private fun versionName(): String =
+        try {
+            packageManager.getPackageInfo(packageName, 0).versionName ?: "?"
+        } catch (t: Throwable) {
+            "?"
+        }
 
     /** 从 `rootfs/.aptuidsh-image` 里解析 `dsh=` 行。 */
     private fun readDshVersion(): String {

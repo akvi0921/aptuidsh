@@ -49,10 +49,10 @@ android {
         }
     }
 
-    androidResources {
-        // rootfs.tar.xz 已是高压缩比格式,再压一遍只会浪费构建时间
-        noCompress += ['xz']
-    }
+    // 注意:这里刻意【不】对 rootfs.tar.xz 使用 noCompress。
+    // 未压缩(uncompressed/stored)的 asset 在读取路径上有一些设备相关的边缘行为,
+    // 而 AssetManager.open(ACCESS_STREAMING) 对 Deflated asset 是必然可用的。
+    // 代价只是构建时多压缩一次(xz 已高压缩比,APK 体积几乎不变),换来安装环节的确定性。
 
     buildTypes {
         release {

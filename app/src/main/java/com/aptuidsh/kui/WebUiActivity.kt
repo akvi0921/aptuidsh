@@ -25,6 +25,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -33,6 +34,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import com.aptuidsh.kui.env.DshAuth
 import com.aptuidsh.kui.env.DshBackend
 import com.aptuidsh.kui.env.ProrootEnv
@@ -109,10 +112,17 @@ class WebUiActivity : ComponentActivity() {
 
     private fun reload() {
         val wv = webView ?: return
-        if (!DshBackend.get().probePort()) {
-            DshServiceWrapper.start(this)
-        }
-        wv.loadUrl(targetUrl())
+        // 探活是网络操作，绝不能在主线程做（否则 NetworkOnMainThreadException 崩溃）
+        Thread {
+            try {
+                if (!DshBackend.get().probeDsh(this)) {
+                    DshServiceWrapper.start(this)
+                }
+            } catch (t: Throwable) {
+                com.aptuidsh.kui.env.EnvLog.e("WebUI 探活失败", t)
+            }
+            runOnUiThread { wv.loadUrl(targetUrl()) }
+        }.start()
     }
 
     override fun onDestroy() {
@@ -145,7 +155,14 @@ private fun WebUiPage(
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     var loading by remember { mutableStateOf(true) }
-    val backendAlive = remember { DshBackend.get().probePort() }
+    // 注意：探活是网络操作。首版在这里直接调用 probePort()，
+    // 由于它位于组合期（主线程）→ NetworkOnMainThreadException → 一开本页就崩溃。
+    var backendAlive by remember { mutableStateOf<Boolean?>(null) }
+    LaunchedEffect(Unit) {
+        backendAlive = withContext(Dispatchers.IO) {
+            runCatching { DshBackend.get().probeDsh(context) }.getOrDefault(false)
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -188,11 +205,15 @@ private fun WebUiPage(
                             loading = false
                         }
                     }
-                    wv.loadUrl(url)
+                    try {
+                        wv.loadUrl(url)
+                    } catch (t: Throwable) {
+                        com.aptuidsh.kui.env.EnvLog.e("WebView.loadUrl 失败", t)
+                    }
                     wv
                 },
             )
-            if (!backendAlive) {
+            if (backendAlive == false) {
                 Text(
                     text = "内置 dsh 后端尚未就绪，请先在主界面启动环境",
                     modifier = Modifier

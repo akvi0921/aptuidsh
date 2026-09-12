@@ -32,6 +32,8 @@ public class DshService extends Service {
     public static final String ACTION_START = "com.aptuidsh.kui.action.BACKEND_START";
     public static final String ACTION_STOP = "com.aptuidsh.kui.action.BACKEND_STOP";
     public static final String ACTION_RESTART = "com.aptuidsh.kui.action.BACKEND_RESTART";
+    /** 安装（必要时）+ 启动，全部在本服务的 worker 线程内完成。 */
+    public static final String ACTION_INSTALL_START = "com.aptuidsh.kui.action.BACKEND_INSTALL_START";
 
     private volatile boolean workerBusy;
 
@@ -53,6 +55,20 @@ public class DshService extends Service {
         startCompat(ctx, i);
     }
 
+    /**
+     * 便捷入口：安装（必要时）+ 启动后端。
+     *
+     * <p><b>为什么不放在 UI 的协程里</b>：首版把这条链路交给 Compose 的
+     * {@code rememberCoroutineScope()}，一旦该作用域被取消或工作抛异常，
+     * 界面上就是「点了没反应、哪儿都没日志」。放进前台服务后：
+     * 服务有自己的 worker 线程、有前台通知、生命周期不受界面影响，
+     * 而且每一步都会写 {@link EnvLog}，失败原因一定看得见。
+     */
+    public static void requestInstallAndStart(Context ctx) {
+        Intent i = new Intent(ctx, DshService.class).setAction(ACTION_INSTALL_START);
+        startCompat(ctx, i);
+    }
+
     private static void startCompat(Context ctx, Intent i) {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -68,43 +84,66 @@ public class DshService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        EnvLog.attach(getApplicationContext());
         createChannel();
+        // 必须先转前台，否则长时间安装在后台会被系统判定为 ANR/被杀
         startForegroundCompat("内置 dsh 启动中…");
         DshAuth.restore(this);
+        EnvLog.i("DshService 已创建");
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent == null ? ACTION_START : intent.getAction();
+        EnvLog.i("DshService.onStartCommand action=" + action);
         if (ACTION_STOP.equals(action)) {
             runAsync(() -> {
-                DshBackend.get().stop(this);
-                stopForegroundCompat();
-                stopSelf();
+                try {
+                    DshBackend.get().stop(this);
+                } catch (Throwable t) {
+                    EnvLog.e("停止失败", t);
+                } finally {
+                    stopForegroundCompat();
+                    stopSelf();
+                }
             });
             return START_NOT_STICKY;
         }
         if (ACTION_RESTART.equals(action)) {
             runAsync(() -> {
-                DshBackend.get().restart(this);
-                updateNotification();
+                try {
+                    DshBackend.get().restart(this);
+                } catch (Throwable t) {
+                    EnvLog.e("重启失败", t);
+                } finally {
+                    updateNotification();
+                }
             });
             return START_STICKY;
         }
+        final boolean installFirst = ACTION_INSTALL_START.equals(action);
         runAsync(() -> {
-            if (!ProrootEnv.isInstalled(this)) {
-                // 环境未安装：交给界面去引导安装，服务不自动展开
-                DshBackend.get().install(this);
+            try {
+                if (installFirst && !ProrootEnv.isInstalled(this)) {
+                    if (!DshBackend.get().install(this)) {
+                        updateNotification();
+                        return;
+                    }
+                }
+                DshBackend.get().start(this);
+            } catch (Throwable t) {
+                EnvLog.e("后台任务失败", t);
+                DshBackend.get().reportError("后台任务失败：" + t);
+            } finally {
+                updateNotification();
             }
-            DshBackend.get().start(this);
-            updateNotification();
         });
         return START_STICKY;
     }
 
     private void runAsync(Runnable r) {
         if (workerBusy) {
-            Log.i(TAG, "worker busy, ignoring duplicate request");
+            EnvLog.w("worker 正忙，忽略重复请求（若界面显示无反应，请等当前任务结束）");
             return;
         }
         workerBusy = true;
