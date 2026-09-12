@@ -353,7 +353,6 @@ public final class DshBackend {
     }
 
     private void launchProcess(Context ctx) throws IOException {
-        String launcher = ProrootEnv.launcherPath(ctx);
         File libDir = new File(ctx.getApplicationInfo().nativeLibraryDir);
         for (String lib : ProrootEnv.PROROOT_LIBS) {
             File f = new File(libDir, lib);
@@ -400,9 +399,9 @@ public final class DshBackend {
         pb.directory(rootfs);
 
         clearLogFile(ctx);
-        EnvLog.i("exec: " + String.join(" ", argv).substring(0, Math.min(240, String.join(" ", argv).length()))
-                + " -b " + ProrootEnv.HOST_SDCARD + ":" + ProrootEnv.GUEST_SDCARD
-                + " -0 --link2symlink -w " + ProrootEnv.GUEST_HOME);
+        String full = String.join(" ", argv);
+        EnvLog.i("exec(" + (ProrootEnv.isLinkerMode() ? "linker64" : "direct") + "): "
+                + full.substring(0, Math.min(300, full.length())) + " …");
         Process p;
         try {
             p = pb.start();
