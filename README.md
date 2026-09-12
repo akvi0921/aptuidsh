@@ -57,6 +57,8 @@ aptuidsh/
 ├── docs/                             # 协议参考与继承自 dsh-aui 的历史文档
 └── tools/
     ├── build-rootfs.sh               # ★ 可重复构建内置镜像
+    ├── build-apk.sh                  # 一键构建 APK
+    ├── jvmtest/                      # ★ 适配层实机测试台（见第十节）
     └── svg2vd.py
 ```
 
@@ -188,3 +190,24 @@ export JAVA_HOME=$PREFIX
 
 > APP 用 **HTTP 身份探测**（401 且响应体含 `dsh`，或 200/303）而不是裸 TCP 判断 3081 上是不是自己的后端，
 > 避免把恰好占用该端口的其它服务误当自己的实例接管。
+
+
+---
+
+## 十、改了协议层一定要跑的工具
+
+```bash
+bash tools/jvmtest/run.sh          # 需要本机 3081 上有 dsh 在跑
+```
+
+它直接编译运行 APP 里**真实的** `net/ApiCompat.java` 与 `net/MuxClient.java`
+（只对 `android.util.Base64` 与 `DshAuth` 打桩），把生成的请求逐个打到真实后端，
+当前 23 项全部通过。
+
+**为什么必须有它**：dsh 0.1.5 的网关对 `args` 的**形参名**校验极严，写错一个键名
+就会让某个功能静默失效——而这在真机上很难定位。这个测试台首次运行就抓出 5 个真实缺陷，
+其中 `MuxClient` 里 `new URL("ws://…")` 那条会让**会话历史直接崩溃**
+（`java.net.URL` 没有 ws 协议处理器）。完整缺陷表见
+`docs/协议适配勘误-dsh-0.1.5.md` 第九节。
+
+升级 dsh 版本后，第一件事就是跑它。
