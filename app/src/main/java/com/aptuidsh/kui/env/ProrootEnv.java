@@ -201,6 +201,43 @@ public final class ProrootEnv {
         }
     }
 
+    // ------------------------------------------------------------------ 事实核查
+
+    /**
+     * 一次性列出环境的关键事实，供控制台直接展示。
+     *
+     * <p>「点了没反应」这类问题最难查的地方在于：用户和开发者都看不到任何中间状态。
+     * 这里把最关键的几项直接摆出来——启动器在不在、能不能执行、rootfs 解没解开、
+     * 磁盘够不够——不需要任何点击，打开控制台就能判断卡在哪一步。
+     */
+    public static java.util.List<String> diagnose(Context ctx) {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        File launcher = new File(launcherPath(ctx));
+        out.add("nativeLibraryDir = " + ctx.getApplicationInfo().nativeLibraryDir);
+        out.add("启动器存在 = " + launcher.exists()
+                + "，可读 = " + launcher.canRead()
+                + "，可执行 = " + launcher.canExecute()
+                + "，大小 = " + launcher.length());
+        File libDir = new File(ctx.getApplicationInfo().nativeLibraryDir);
+        String[] libs = libDir.list();
+        int libCount = libs == null ? -1 : libs.length;
+        out.add("nativeLibraryDir 条目数 = " + libCount);
+        for (String lib : PROROOT_LIBS) {
+            File f = new File(libDir, lib);
+            out.add("  " + lib + " 存在=" + f.exists() + " 可执行=" + f.canExecute());
+        }
+        File root = rootfsDir(ctx);
+        out.add("rootfs 目录 = " + root.getAbsolutePath() + "，存在 = " + root.exists());
+        out.add("安装标记 = " + installMarker(ctx).exists());
+        out.add("关键文件: bin/sh=" + new File(root, "bin/sh").exists()
+                + " node=" + new File(root, "usr/local/bin/node").exists()
+                + " dsh=" + new File(root, "usr/local/bin/dsh").exists());
+        long free = ctx.getFilesDir().getUsableSpace();
+        out.add("filesDir 可用空间 = " + (free >> 20) + "MB（安装约需 670MB）");
+        out.add("需安装 = " + !isInstalled(ctx));
+        return out;
+    }
+
     // ------------------------------------------------------------------ 自检
 
     /** 自检结果。 */

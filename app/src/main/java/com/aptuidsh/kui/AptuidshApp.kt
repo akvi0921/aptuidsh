@@ -143,7 +143,9 @@ class AptuidshApp : Application() {
     companion object {
         private const val TAG = "AptuidshApp"
 
-        /** 后端是否正在监听。 */
-        fun backendRunning(): Boolean = DshBackend.get().probePort()
+        // 说明：这里刻意不提供「同步探活」便捷方法。
+        // 探活是网络操作，任何在组合期/主线程调用它的写法都会触发
+        // NetworkOnMainThreadException（首版就是这样把「官方 Web UI」页搞崩的）。
+        // 需要探活请用 DshBackend.probeDsh() 并放到 IO 线程。
     }
 }

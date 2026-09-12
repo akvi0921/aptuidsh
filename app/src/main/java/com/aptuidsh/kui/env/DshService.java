@@ -77,7 +77,8 @@ public class DshService extends Service {
                 ctx.startService(i);
             }
         } catch (Throwable t) {
-            Log.w(TAG, "start service failed: " + t);
+            // 关键：服务起不来时界面就是「点了没反应」，必须留下原因
+            EnvLog.e("启动 DshService 失败（action=" + i.getAction() + "）", t);
         }
     }
 

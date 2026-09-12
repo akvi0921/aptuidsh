@@ -66,7 +66,12 @@ fun EnvControlCard(
     val backend = remember { DshBackend.get() }
 
     var status by remember { mutableStateOf(backend.status(context)) }
-    var busy by remember { mutableStateOf(false) }
+
+    // 由真实阶段推导「忙碌」，而不是靠本地布尔量：
+    // 首版用本地 busy 标记，一旦工作转交外部执行就没有复位时机，按钮会永久禁用（表现为点了没反应）。
+    val busy = status.phase == DshBackend.Phase.INSTALLING
+            || status.phase == DshBackend.Phase.STARTING
+            || status.phase == DshBackend.Phase.STOPPING
 
     // 轮询状态：安装/启动过程中会持续刷新进度
     LaunchedEffect(Unit) {
@@ -165,7 +170,6 @@ fun EnvControlCard(
                     Button(
                         enabled = !busy,
                         onClick = {
-                            busy = true
                             // 交给前台服务执行：服务有自己的 worker 线程，
                             // 不受界面协程作用域影响，且全程写 EnvLog
                             DshService.requestInstallAndStart(context)
@@ -175,14 +179,12 @@ fun EnvControlCard(
                     OutlinedButton(
                         enabled = !busy,
                         onClick = {
-                            busy = true
                             DshService.requestStop(context)
                         },
                     ) { Text("停止") }
                     OutlinedButton(
                         enabled = !busy,
                         onClick = {
-                            busy = true
                             DshService.requestRestart(context)
                         },
                     ) { Text("重启") }
@@ -190,7 +192,6 @@ fun EnvControlCard(
                     Button(
                         enabled = !busy,
                         onClick = {
-                            busy = true
                             DshService.requestStart(context)
                         },
                     ) { Text("启动后端") }
@@ -240,8 +241,10 @@ fun EnvConsoleScreen(onBack: () -> Unit) {
 
     var status by remember { mutableStateOf(backend.status(context)) }
     var logs by remember { mutableStateOf(EnvLog.lines()) }
-    var busy by remember { mutableStateOf(false) }
     var smokeResult by remember { mutableStateOf<String?>(null) }
+    val busy = status.phase == DshBackend.Phase.INSTALLING
+            || status.phase == DshBackend.Phase.STARTING
+            || status.phase == DshBackend.Phase.STOPPING
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -298,26 +301,39 @@ fun EnvConsoleScreen(onBack: () -> Unit) {
                 InfoLine("端口", if (status.portAlive) "已监听" else "未监听")
                 InfoLine("dsh", com.aptuidsh.kui.net.ApiCompat.dshVersion())
                 InfoLine("镜像", status.imageInfo?.replace("\n", " · ") ?: "—")
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = "环境事实核查（无需点击即可见）",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                // 这些是「安装点了没反应」时最需要一眼看到的东西：
+                // 启动器在不在、能不能执行、镜像解没解开、空间够不够。
+                for (line in ProrootEnv.diagnose(context)) {
+                    Text(
+                        text = line,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 Spacer(Modifier.height(10.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(
                         enabled = !busy,
                         onClick = {
-                            busy = true
                             DshService.requestStart(context)
                         },
                     ) { Text("启动") }
                     OutlinedButton(
                         enabled = !busy,
                         onClick = {
-                            busy = true
                             DshService.requestStop(context)
                         },
                     ) { Text("停止") }
                     OutlinedButton(
                         enabled = !busy,
                         onClick = {
-                            busy = true
                             DshService.requestRestart(context)
                         },
                     ) { Text("重启") }
@@ -327,7 +343,6 @@ fun EnvConsoleScreen(onBack: () -> Unit) {
                     OutlinedButton(
                         enabled = !busy,
                         onClick = {
-                            busy = true
                             scope.launch {
                                 val smoke = withContext(Dispatchers.IO) {
                                     ProrootEnv.smokeTestGuest(context)
@@ -339,14 +354,12 @@ fun EnvConsoleScreen(onBack: () -> Unit) {
                                         append('\n').append(smoke.output.trim())
                                     }
                                 }
-                                busy = false
                             }
                         },
                     ) { Text("运行自检") }
                     OutlinedButton(
                         enabled = !busy,
                         onClick = {
-                            busy = true
                             Thread {
                                 try {
                                     EnvLog.i("== 重装环境 ==")
@@ -362,7 +375,6 @@ fun EnvConsoleScreen(onBack: () -> Unit) {
                     OutlinedButton(
                         enabled = !busy,
                         onClick = {
-                            busy = true
                             Thread {
                                 try {
                                     DshBackend.get().stop(context)
@@ -371,7 +383,6 @@ fun EnvConsoleScreen(onBack: () -> Unit) {
                                 } catch (t: Throwable) {
                                     EnvLog.e("卸载失败", t)
                                 }
-                                busy = false
                             }.start()
                         },
                     ) { Text("卸载环境") }
