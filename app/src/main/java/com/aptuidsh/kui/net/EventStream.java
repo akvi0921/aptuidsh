@@ -502,7 +502,20 @@ public class EventStream {
     // ==================== $events（全局事件 → host 等价帧） ====================
 
     private void dispatchHostItem(JSONObject item, String itemType) {
-        // $events 的 ready 帧用于标记连接代，UI 可扩展，但当前无旧映射
+        // ready 帧携带本连接代的 clientId —— 回执（$events/result）必须带它，先登记
+        if ("ready".equals(itemType)) {
+            WaterfallRegistry.setClientId(item.optString("clientId", ""));
+            return;
+        }
+        // waterfall 帧 = 需要客户端给出 outcome 的请求（审批 / 提问）。
+        // 实测外壳：
+        //   {"type":"waterfall","event":"user-questions/request",
+        //    "eventId":"31a228f3-…","agentId":"session-…",
+        //    "request":{"questions":[{"id":"color",…,"options":[…]}]}}
+        if ("waterfall".equals(itemType)) {
+            dispatchWaterfall(item);
+            return;
+        }
         if ("emit".equals(itemType)) {
             // 官方 Cordis emit 事件经 $events 下发，旧 host 通道转发的是 host/remote-event 信封
             String event = item.optString("event", "");
@@ -521,6 +534,64 @@ public class EventStream {
             DshEventListener l = listener;
             if (l != null) l.onHostEvent(envelope);
         }
+    }
+
+    /**
+     * waterfall 帧 → 旧版待应答帧。
+     *
+     * <p>新协议把审批/提问做成 {@code approval/request}、{@code user-questions/request}
+     * 两个 waterfall 事件，统一带 {@code eventId}；旧 UI 认的是
+     * {@code approval/requested} 与 {@code question/requested} 两个 mux 帧，
+     * 且把 rpcId 当作应答凭据。这里把 {@code eventId} 同时写进信封 rpcId，
+     * 使 {@code DshClient.respond} 能原样把它映射回 {@code $events/result}。
+     */
+    private void dispatchWaterfall(JSONObject item) {
+        String event = item.optString("event", "");
+        String eventId = item.optString("eventId", "");
+        String agentId = item.optString("agentId", "");
+        JSONObject request = item.optJSONObject("request");
+        if (eventId.isEmpty()) return;
+
+        WaterfallRegistry.record(eventId, event, agentId, request == null ? new JSONObject() : request);
+
+        String legacyType;
+        if ("user-questions/request".equals(event)) {
+            legacyType = "question/requested";
+        } else if ("approval/request".equals(event)) {
+            legacyType = "approval/requested";
+        } else {
+            return; // 其它 waterfall 事件暂不映射
+        }
+
+        JSONObject payload = new JSONObject();
+        try {
+            payload.put("type", legacyType);
+            payload.put("sessionId", agentId);
+            payload.put("rpcId", eventId);
+            if ("question/requested".equals(legacyType)) {
+                payload.put("questions", request == null
+                        ? new org.json.JSONArray() : request.optJSONArray("questions"));
+                payload.put("questionId", eventId);
+            } else {
+                payload.put("approvalId", eventId);
+                if (request != null) {
+                    if (request.has("toolName")) payload.put("toolName", request.optString("toolName", ""));
+                    if (request.has("callId")) payload.put("callId", request.optString("callId", ""));
+                    if (request.has("reason")) payload.put("reason", request.optString("reason", ""));
+                }
+            }
+        } catch (JSONException ignored) {
+            return;
+        }
+
+        JSONObject envelope = muxEnvelope(legacyType, payload);
+        try {
+            envelope.put("rpcId", eventId);
+        } catch (JSONException ignored) {
+        }
+        updatePendingInteractionView(envelope, payload, legacyType);
+        DshEventListener l = listener;
+        if (l != null) l.onMuxEvent(envelope);
     }
 
     // ==================== session/follow（会话实时流 → mux 等价帧） ====================
@@ -1038,6 +1109,8 @@ public class EventStream {
             synchronized (frameLock) {
                 pendingInteractionFrames.clear();
             }
+            // 旧连接代的 eventId/clientId 在新连接里已失效，一并作废（重连会重放仍待处理的帧）
+            WaterfallRegistry.clear();
         }
     }
 

@@ -1105,6 +1105,56 @@ public class DshClient {
     }
 
     /**
+     * 合成 {@code session.history}：用一次性的 {@code session/follow} 流取 opening snapshot。
+     *
+     * <p>新版 {@code session/page} 需要 {@code throughSeq} 且<b>不得超过会话当前游标</b>：
+     * <pre>
+     * {"code":"gateway/bad-request","message":"session page through seq 2147483647 is past cursor 2"}
+     * </pre>
+     * 而游标只出现在 follow 流的 opening snapshot 里。官方客户端同样是「先 follow 拿快照，
+     * 再按 beforeSeq 往前翻页」。这里取快照的 records 直接还原成旧版事件账本形状
+     * {@code {events:[…], hasMore}}，上层 UI 无需改动。
+     */
+    private JSONObject syntheticSessionHistory(String sessionId) throws IOException, JSONException {
+        JSONObject envelope = new JSONObject();
+        JSONObject out = new JSONObject();
+        JSONArray events = new JSONArray();
+        boolean hasMore = false;
+
+        if (sessionId != null && !sessionId.isEmpty()) {
+            JSONObject args = new JSONObject();
+            JSONObject request = new JSONObject();
+            JSONObject address = new JSONObject();
+            address.put("kind", "session");
+            address.put("sessionId", sessionId);
+            request.put("address", address);
+            request.put("maxMessages", 400);
+            args.put("request", request);
+
+            JSONObject snapshot = MuxClient.openAndFirstItem(
+                    baseUrl, "session/follow", args, Math.max(timeoutMs, 15000));
+            if (snapshot != null) {
+                hasMore = snapshot.optBoolean("hasMore", false);
+                JSONArray records = snapshot.optJSONArray("records");
+                if (records != null) {
+                    for (int i = 0; i < records.length(); i++) {
+                        JSONObject rec = records.optJSONObject(i);
+                        if (rec == null) continue;
+                        JSONObject ev = rec.optJSONObject("event");
+                        if (ev != null) events.put(ev);
+                    }
+                }
+            }
+        }
+
+        out.put("events", events);
+        out.put("hasMore", hasMore);
+        envelope.put("ok", true);
+        envelope.put("value", out);
+        return envelope;
+    }
+
+    /**
      * 合成 {@code host.describe} 结果（新版 API 已删除该方法）。
      *
      * <p>数据来源：{@code settings/describe}（默认模型、可写性）+ {@code llm/listProviders}
