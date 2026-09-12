@@ -71,7 +71,9 @@ public final class RootfsInstaller {
         //noinspection ResultOfMethodCallIgnored
         marker.delete();
 
-        File archive = new File(ctx.getCacheDir(), ProrootEnv.ROOTFS_ASSET);
+        // 归档放 filesDir 而不是 cacheDir：cache 在存储紧张时会被系统回收，
+        // 若在解压途中被清掉会导致 rootfs 半成品（filesDir 不可被系统回收）。
+        File archive = new File(ctx.getFilesDir(), ProrootEnv.ROOTFS_ASSET);
         long total = assetSize(ctx);
         long copied = 0;
         report(progress, "释放内置运行环境…", 3);
@@ -140,7 +142,7 @@ public final class RootfsInstaller {
         //noinspection ResultOfMethodCallIgnored
         ProrootEnv.installMarker(ctx).delete();
         //noinspection ResultOfMethodCallIgnored
-        new File(ctx.getCacheDir(), ProrootEnv.ROOTFS_ASSET).delete();
+        new File(ctx.getFilesDir(), ProrootEnv.ROOTFS_ASSET).delete();
     }
 
     /** 已安装环境的磁盘占用（字节）。 */
