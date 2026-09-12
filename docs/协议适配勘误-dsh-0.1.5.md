@@ -222,3 +222,72 @@ cd ~/aptuidsh-rnd && node e2e.mjs      # 建会话 -> follow -> prompt -> 打印
 3. 确认 `session/follow` 仍返回 `snapshot` + `event` + `assistant-stream` 三类 item。
 4. 确认 `host.describe` 仍不存在（若回归，删掉 `syntheticHostDescribe` 即可）。
 5. 确认 Cookie 机制未变（看 `dsh-client-connection/lib/index.js` 的 `BrowserAuth`）。
+
+---
+
+## 七、审批 / 提问的应答（`/api/respond` 已废弃）
+
+### 现象
+```
+$ curl -X POST -b ck.txt http://127.0.0.1:3081/api/respond -d '{}'
+HTTP/1.1 404 Not Found
+```
+且全套 dsh 包里已搜不到 `client-response` 字样——旧回执信封被整体移除。
+
+### 新机制（实测 + 类型定义双确认）
+待应答的请求以 **waterfall 帧**经 `$events` 下发，实测原样报文：
+```json
+{"type":"item","streamId":"dsh-ev-host","value":{
+   "type":"waterfall",
+   "event":"user-questions/request",
+   "eventId":"7687321d-d986-4fd0-870d-7c65d10d9cfe",
+   "agentId":"session-4eb800f9-531b-4c90-8ea6-131d5912a0ad",
+   "request":{"questions":[{"id":"color","question":"你喜欢什么颜色？",
+                            "header":"颜色偏好",
+                            "options":[{"label":"红色"},{"label":"蓝色"}]}]}}}
+```
+
+应答 = 一次普通 HTTP RPC，端点 `$events/result`：
+```json
+POST /api/$events/result
+{"args":{"clientId":"<ready 帧的 clientId>",
+         "eventId":"7687321d-…",
+         "outcome":{"kind":"result","value":{"answers":[{"id":"color","selected":["蓝色"]}]}}}}
+```
+- `outcome.kind` ∈ `next`（委派给下一个应答者）| `result`（给出结论）| `rejected`
+- **提问**的 `value` 就是 `AskUserQuestionAnswer = {answers:[{id, selected:[], custom?}]}`
+- **审批**的 `value` 是闭集字符串 `ApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'`
+  （注意不是 "approved"，`allowed-once` 才是授权）
+
+### 端到端实测（本文档写作时跑通）
+```
+[prompt]  请用 ask_user_question 问我一个问题…
+[waterfall] eventId=7687321d-…  questions=[{id:color,…}]
+[answer]   POST /api/$events/result → HTTP 200 {"result":{"ok":true}}
+[agent]    你选择的颜色是蓝色。          ← agent 确实收到了答案
+[turn/end] {"kind":"completed"}
+```
+
+### APP 侧实现
+- `WaterfallRegistry`：登记 `clientId`（ready 帧）与待应答的 `eventId → {event, agentId, request}`；
+  连接代切换时清空（旧 eventId 跨连接失效，但服务端会在新连接上**重放**仍待处理的请求）。
+- `EventStream.dispatchWaterfall()`：把 `user-questions/request` / `approval/request`
+  翻译成旧 UI 认的 `question/requested` / `approval/requested` mux 帧，
+  并把 `eventId` 同时写进信封的 `rpcId`（旧 UI 正是拿 rpcId 当应答凭据）。
+- `DshClient.respond()`：把旧式载荷映射成 `$events/result` 的 args，
+  审批 outcome 做取值归一（`approved` → `allowed-once` 等），成功即从登记表移除。
+
+---
+
+## 八、会话历史的取法（`session/page` 的游标限制）
+
+`session/page` 要求 `throughSeq` **不得超过会话当前游标**，实测超限报错：
+```json
+{"ok":false,"error":{"code":"gateway/bad-request",
+ "message":"session page through seq 2147483647 is past cursor 2"}}
+```
+而游标只在 `session/follow` 的 opening snapshot 里下发（字段 `cursor`）。
+因此 APP 侧把 `session.history` 实现为**一次性的 follow 流取快照**（`net/MuxClient.java`：
+开一条逻辑流 → 读第一个 item → 关闭），再把 `records[].event` 还原成旧版
+`{events:[…], hasMore}` 事件账本，上层 UI 零改动。
+这与官方客户端「先 follow 拿快照、再按 beforeSeq 往前翻页」的做法一致。

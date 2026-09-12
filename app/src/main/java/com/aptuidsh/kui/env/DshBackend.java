@@ -303,7 +303,9 @@ public final class DshBackend {
                 "-w", ProrootEnv.GUEST_HOME,
                 "/bin/sh", "-c", script);
 
-        // 干净环境：只注入 Ubuntu 需要的最小集合
+        // 干净环境：只注入 Ubuntu 需要的最小集合。
+        // 必须清空——宿主环境里的 PREFIX 等变量会透传进 guest，把 npm 的全局前缀
+        // 解析到宿主路径（实测踩过：包会被装进宿主的 node_modules）。
         pb.environment().clear();
         pb.environment().put("HOME", ProrootEnv.GUEST_HOME);
         pb.environment().put("PATH", ProrootEnv.GUEST_PATH);
@@ -311,6 +313,9 @@ public final class DshBackend {
         pb.environment().put("LANG", "C.UTF-8");
         pb.environment().put("TMPDIR", "/tmp");
         pb.environment().put("PROROOT_TMP_DIR", ProrootEnv.tmpDir(ctx).getAbsolutePath());
+        // Android 平台变量：bionic 与部分系统调用路径会读它们，补上以免出现平台相关怪象
+        pb.environment().put("ANDROID_ROOT", "/system");
+        pb.environment().put("ANDROID_DATA", "/data");
         pb.redirectErrorStream(true);
         pb.directory(rootfs);
 
