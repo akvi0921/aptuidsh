@@ -321,6 +321,31 @@ public final class ProrootEnv {
         return out;
     }
 
+    // ------------------------------------------------------------------ 崩溃报告
+
+    /** 崩溃报告文件（由 AptuidshApp 的全局未捕获异常处理器写入，用户可直接取）。 */
+    public static File crashFile(Context ctx) {
+        File dir = ctx.getExternalFilesDir(null);
+        if (dir == null) dir = ctx.getFilesDir();
+        return new File(dir, "crash.txt");
+    }
+
+    /** 读取崩溃报告文本；不存在返回 null。 */
+    public static String crashText(Context ctx) {
+        File f = crashFile(ctx);
+        if (!f.exists()) return null;
+        try {
+            byte[] all = new byte[(int) Math.min(f.length(), 256 * 1024)];
+            try (java.io.FileInputStream in = new java.io.FileInputStream(f)) {
+                int off = 0, n;
+                while (off < all.length && (n = in.read(all, off, all.length - off)) > 0) off += n;
+                return new String(all, 0, off, StandardCharsets.UTF_8);
+            }
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
     // ------------------------------------------------------------------ 诊断报告
 
     /**

@@ -130,35 +130,68 @@ class WebUiActivity : ComponentActivity() {
             try {
                 if (!request.isForMainFrame) return null
                 val url: Uri = request.url
-                val target = url.toString()
+                var target = url.toString()
                 if (!target.startsWith(ProrootEnv.BASE_URL)) return null
                 val path = url.path ?: return null
                 if (path != "/" && path != "/index.html") return null
 
-                val conn = (URL(target).openConnection() as HttpURLConnection).apply {
-                    requestMethod = "GET"
-                    connectTimeout = 8000
-                    readTimeout = 15000
-                    instanceFollowRedirects = false
-                    setRequestProperty("Connection", "close")
-                    // 复用 WebView 的 CookieJar（token 交换后 Cookie 已在这里）
-                    CookieManager.getInstance().getCookie(ProrootEnv.BASE_URL)?.let {
-                        setRequestProperty("Cookie", it)
+                // 关键：必须自己跟随重定向。
+                // 首次加载的是 /?token=<launchToken>，服务端返回 303 并在 Set-Cookie 里下发
+                // 签名 Cookie；而 WebView 跟随重定向后的那次请求**不会再经过
+                // shouldInterceptRequest**，导致垫片永远注不进去（实测日志：
+                // "跳过垫片注入：根文档返回 HTTP 303" 之后 "typeof Iterator = undefined"）。
+                // 这里手动跟完重定向链，把 Set-Cookie 写进 WebView 的 CookieJar，再对最终
+                // 的 200 HTML 注入垫片。
+                var cookie = CookieManager.getInstance().getCookie(ProrootEnv.BASE_URL + "/")
+                var hops = 0
+                while (hops++ < 5) {
+                    val conn = (URL(target).openConnection() as HttpURLConnection).apply {
+                        requestMethod = "GET"
+                        connectTimeout = 8000
+                        readTimeout = 15000
+                        instanceFollowRedirects = false
+                        setRequestProperty("Connection", "close")
+                        if (!cookie.isNullOrEmpty()) setRequestProperty("Cookie", cookie)
                     }
-                }
-                val code = conn.responseCode
-                if (code != HttpURLConnection.HTTP_OK) {
-                    conn.disconnect()
-                    EnvLog.w("跳过垫片注入：根文档返回 HTTP " + code)
-                    return null
-                }
-                val html = conn.inputStream.use { it.readBytes().toString(Charsets.UTF_8) }
-                conn.disconnect()
+                    val code = conn.responseCode
 
-                val injected = WebPolyfill.inject(html)
-                EnvLog.i("已向官方 Web UI 注入兼容性垫片（原文档 " + html.length + " 字节）")
-                return WebResourceResponse(
-                    "text/html", "utf-8", injected.byteInputStream(Charsets.UTF_8))
+                    // 捕获并保存服务端下发的 Cookie（token 交换就靠这一步）
+                    conn.headerFields["Set-Cookie"]?.forEach { raw ->
+                        val pair = raw.substringBefore(';').trim()
+                        if (pair.isNotEmpty()) {
+                            CookieManager.getInstance().setCookie(ProrootEnv.BASE_URL + "/", pair)
+                            EnvLog.i("已保存服务端下发的 Cookie: " + pair.substringBefore('=') + "=…")
+                        }
+                    }
+                    CookieManager.getInstance().flush()
+
+                    if (code == 301 || code == 302 || code == 303 || code == 307 || code == 308) {
+                        val loc = conn.getHeaderField("Location")
+                        conn.disconnect()
+                        if (loc.isNullOrEmpty()) {
+                            EnvLog.w("重定向缺少 Location，放弃注入")
+                            return null
+                        }
+                        target = URL(URL(target), loc).toString()
+                        cookie = CookieManager.getInstance().getCookie(ProrootEnv.BASE_URL + "/")
+                        continue
+                    }
+                    if (code != HttpURLConnection.HTTP_OK) {
+                        conn.disconnect()
+                        EnvLog.w("跳过垫片注入：根文档最终返回 HTTP " + code)
+                        return null
+                    }
+                    val html = conn.inputStream.use { it.readBytes().toString(Charsets.UTF_8) }
+                    conn.disconnect()
+
+                    val injected = WebPolyfill.inject(html)
+                    EnvLog.i("已向官方 Web UI 注入兼容性垫片（原文档 " + html.length + " 字节，"
+                            + hops + " 跳）")
+                    return WebResourceResponse(
+                        "text/html", "utf-8", injected.byteInputStream(Charsets.UTF_8))
+                }
+                EnvLog.w("重定向链超过 5 跳，放弃注入")
+                return null
             } catch (t: Throwable) {
                 EnvLog.w("注入垫片失败（将按原页面加载）: " + t)
                 return null

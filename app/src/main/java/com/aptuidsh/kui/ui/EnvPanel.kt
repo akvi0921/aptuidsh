@@ -34,7 +34,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -242,6 +244,9 @@ fun EnvConsoleScreen(onBack: () -> Unit) {
     var status by remember { mutableStateOf(backend.status(context)) }
     var logs by remember { mutableStateOf(EnvLog.lines()) }
     var smokeResult by remember { mutableStateOf<String?>(null) }
+    var toast by remember { mutableStateOf<String?>(null) }
+    val clipboard = LocalClipboardManager.current
+    val logScroll = rememberScrollState()
     val busy = status.phase == DshBackend.Phase.INSTALLING
             || status.phase == DshBackend.Phase.STARTING
             || status.phase == DshBackend.Phase.STOPPING
@@ -251,6 +256,13 @@ fun EnvConsoleScreen(onBack: () -> Unit) {
             status = backend.status(context)
             logs = EnvLog.lines()
             delay(900)
+        }
+    }
+    // 日志自动滚到底：日志区固定高度，不自动滚会一直停在最早几行，
+    // 看起来像"日志没输出"（首版就吃过这个亏）
+    LaunchedEffect(logs.size) {
+        if (logs.isNotEmpty()) {
+            logScroll.animateScrollTo(logScroll.maxValue)
         }
     }
     DisposableEffect(Unit) {
@@ -400,7 +412,7 @@ fun EnvConsoleScreen(onBack: () -> Unit) {
         }
         Spacer(Modifier.height(12.dp))
         Text(
-            text = "全过程日志（安装阶段 / proroot / dsh / 异常栈）",
+            text = "全过程日志（含内置 dsh 启动输出）· 共 " + logs.size + " 行",
             style = MaterialTheme.typography.labelLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -414,11 +426,11 @@ fun EnvConsoleScreen(onBack: () -> Unit) {
                 Modifier
                     .fillMaxWidth()
                     .padding(10.dp)
-                    .verticalScroll(rememberScrollState()),
+                    .verticalScroll(logScroll),
             ) {
-                val text = logs.takeLast(400).joinToString("\n")
+                val text = logs.takeLast(600).joinToString("\n")
                 Text(
-                    text = text.ifEmpty { "（暂无输出）" },
+                    text = "日志文件: " + EnvLog.file(context).absolutePath + "\n\n" + text.ifEmpty { "（暂无输出）" },
                     style = MaterialTheme.typography.labelSmall,
                     fontFamily = FontFamily.Monospace,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
