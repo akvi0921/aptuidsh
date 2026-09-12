@@ -252,6 +252,7 @@ fun EnvConsoleScreen(onBack: () -> Unit) {
     var status by remember { mutableStateOf(backend.status(context)) }
     var logs by remember { mutableStateOf(backend.recentLog().toList()) }
     var busy by remember { mutableStateOf(false) }
+    var smokeResult by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -342,6 +343,25 @@ fun EnvConsoleScreen(onBack: () -> Unit) {
                         onClick = {
                             busy = true
                             scope.launch {
+                                val smoke = withContext(Dispatchers.IO) {
+                                    ProrootEnv.smokeTestGuest(context)
+                                }
+                                smokeResult = buildString {
+                                    append(if (smoke.ok) "自检通过" else "自检失败")
+                                    append("：").append(smoke.summary)
+                                    if (smoke.output.isNotEmpty()) {
+                                        append('\n').append(smoke.output.trim())
+                                    }
+                                }
+                                busy = false
+                            }
+                        },
+                    ) { Text("运行自检") }
+                    OutlinedButton(
+                        enabled = !busy,
+                        onClick = {
+                            busy = true
+                            scope.launch {
                                 withContext(Dispatchers.IO) {
                                     backend.stop(context)
                                     RootfsInstaller.uninstall(context)
@@ -361,6 +381,15 @@ fun EnvConsoleScreen(onBack: () -> Unit) {
                             }
                         },
                     ) { Text("卸载环境") }
+                }
+                if (smokeResult != null) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = smokeResult!!,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
         }

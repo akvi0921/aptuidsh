@@ -200,4 +200,120 @@ public final class ProrootEnv {
             return null;
         }
     }
+
+    // ------------------------------------------------------------------ 自检
+
+    /** 自检结果。 */
+    public static final class Smoke {
+        /** 是否通过。 */
+        public final boolean ok;
+        /** 面向用户的结论。 */
+        public final String summary;
+        /** 原始输出（诊断用）。 */
+        public final String output;
+
+        Smoke(boolean ok, String summary, String output) {
+            this.ok = ok;
+            this.summary = summary;
+            this.output = output;
+        }
+    }
+
+    /**
+     * 启动器自检：只 exec {@code libproroot.so}（不带参数，它会打印用法后退出）。
+     *
+     * <p>这是整个方案里唯一无法在开发机上验证的环节——<b>Android 10+ 只允许 exec
+     * nativeLibraryDir 里的文件</b>（应用数据目录被 SELinux 禁止 exec）。带参数跑一次
+     * 自检就能在解压 585MB 之前就把这类环境问题暴露出来，而不是等安装完才发现启动失败。
+     */
+    public static Smoke smokeTestLauncher(Context ctx) {
+        File launcher = new File(launcherPath(ctx));
+        if (!launcher.exists()) {
+            return new Smoke(false, "缺少启动器 " + launcher.getAbsolutePath(), "");
+        }
+        if (!launcher.canExecute()) {
+            return new Smoke(false, "启动器不可执行（权限位未置位）: " + launcher, "");
+        }
+        return runCaptured(new String[]{launcher.getAbsolutePath()}, null, 12_000L,
+                "启动器可执行", "启动器无法执行");
+    }
+
+    /**
+     * Guest 自检：真正进 rootfs 跑一条命令，验证「proroot + rootfs + 动态链接」整条链。
+     *
+     * <p>等价于 {@code libproroot.so -r <rootfs> -0 --link2symlink /bin/sh -c '…'}。
+     */
+    public static Smoke smokeTestGuest(Context ctx) {
+        if (!isInstalled(ctx)) {
+            return new Smoke(false, "尚未安装内置环境", "");
+        }
+        File launcher = new File(launcherPath(ctx));
+        String[] cmd = {
+                launcher.getAbsolutePath(),
+                "-r", rootfsDir(ctx).getAbsolutePath(),
+                "-0", "--link2symlink",
+                "-w", GUEST_HOME,
+                "/bin/sh", "-c",
+                "echo APTUIDSH-SMOKE-OK; uname -m; /usr/local/bin/node -v; /usr/local/bin/dsh --version",
+        };
+        return runCaptured(cmd, ctx, 30_000L, "guest 自检通过", "guest 自检失败");
+    }
+
+    /** 以干净环境执行命令并捕获输出（与后端启动使用同一套环境规则）。 */
+    private static Smoke runCaptured(String[] cmd, Context ctx, long timeoutMs,
+                                     String okSummary, String failSummary) {
+        Process p = null;
+        ProcessBuilder pb = new ProcessBuilder(cmd);
+        pb.environment().clear();
+        pb.environment().put("HOME", GUEST_HOME);
+        pb.environment().put("PATH", GUEST_PATH);
+        pb.environment().put("TERM", "xterm");
+        pb.environment().put("LANG", "C.UTF-8");
+        pb.environment().put("TMPDIR", "/tmp");
+        pb.environment().put("ANDROID_ROOT", "/system");
+        pb.environment().put("ANDROID_DATA", "/data");
+        if (ctx != null) {
+            pb.environment().put("PROROOT_TMP_DIR", tmpDir(ctx).getAbsolutePath());
+            pb.directory(rootfsDir(ctx));
+        }
+        pb.redirectErrorStream(true);
+        try {
+            p = pb.start();
+            final Process proc = p;
+            StringBuilder sb = new StringBuilder();
+            Thread reader = new Thread(() -> {
+                try (java.io.BufferedReader r = new java.io.BufferedReader(
+                        new java.io.InputStreamReader(proc.getInputStream(), StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = r.readLine()) != null) {
+                        if (sb.length() < 8192) sb.append(line).append('\n');
+                    }
+                } catch (IOException ignored) {
+                }
+            }, "proroot-smoke");
+            reader.setDaemon(true);
+            reader.start();
+
+            boolean finished = p.waitFor(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+            if (!finished) {
+                p.destroyForcibly();
+                return new Smoke(false, "启动器超时无响应（被系统拦截？）", sb.toString());
+            }
+            reader.join(1500);
+            int code = p.exitValue();
+            String out = sb.toString();
+            boolean ok = code == 0 || out.contains("APTUIDSH-SMOKE-OK")
+                    || out.contains("Usage:");
+            return new Smoke(ok, (ok ? okSummary : failSummary) + "（exit=" + code + "）", out);
+        } catch (IOException e) {
+            // 这一步最典型的失败是 EACCES/EPERM：Android 10+ 禁止在应用数据目录 exec 文件
+            String msg = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+            return new Smoke(false, "无法执行 proroot 启动器：" + msg, "");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return new Smoke(false, "自检被中断", "");
+        } finally {
+            if (p != null) p.destroy();
+        }
+    }
 }

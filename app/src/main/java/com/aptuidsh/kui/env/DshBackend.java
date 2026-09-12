@@ -117,6 +117,8 @@ public final class DshBackend {
     private volatile boolean portAlive;
     private volatile int progressPercent = -1;
     private volatile boolean stopRequested;
+    /** guest 自检是否已通过（每个进程只需验一次）。 */
+    private volatile boolean guestVerified;
 
     private DshBackend() {
     }
@@ -177,6 +179,14 @@ public final class DshBackend {
             return true;
         }
         setPhase(ctx, Phase.INSTALLING, "正在安装内置 Linux 环境…");
+        // 解压 585MB 之前先确认启动器能跑：Android 10+ 只允许 exec nativeLibraryDir 里的文件，
+        // 一旦这条不成立，装完也是白装。
+        ProrootEnv.Smoke launcherSmoke = ProrootEnv.smokeTestLauncher(ctx);
+        if (!launcherSmoke.ok) {
+            setPhase(ctx, Phase.ERROR, "无法执行内置 proroot 启动器：" + launcherSmoke.summary
+                    + (launcherSmoke.output.isEmpty() ? "" : "\n" + launcherSmoke.output));
+            return false;
+        }
         try {
             RootfsInstaller.install(ctx, (stage, percent) -> {
                 progressPercent = percent;
@@ -220,11 +230,30 @@ public final class DshBackend {
             stopRequested = false;
             setPhase(ctx, Phase.STARTING, "正在启动内置 dsh…");
 
-            // 已有实例在监听（例如上次进程未被回收）：直接接管
-            if (probePort()) {
+            // 一次性 guest 自检：在拉起常驻进程之前先确认「proroot + rootfs」这条链是通的，
+            // 否则用户只会看到一个语焉不详的启动超时。
+            if (!guestVerified) {
+                ProrootEnv.Smoke smoke = ProrootEnv.smokeTestGuest(ctx);
+                if (!smoke.ok) {
+                    setPhase(ctx, Phase.ERROR, "自检未通过：" + smoke.summary);
+                    return false;
+                }
+                guestVerified = true;
+                Log.i(TAG, "guest smoke test passed");
+            }
+
+            // 已有 dsh 实例在监听（例如上次进程未被回收）：直接接管。
+            // 用 HTTP 身份探测而不是裸 TCP，避免把恰好占用 3081 的其它服务当成自己人。
+            if (probeDsh(ctx)) {
                 portAlive = true;
                 DshAuth.restore(ctx);
                 DshAuth.exchange(ctx);
+                if (DshAuth.cookieHeader() == null && !DshAuth.reauth()) {
+                    setPhase(ctx, Phase.ERROR,
+                            "3081 端口已被另一个 dsh 实例占用，且无法取得其鉴权凭据。"
+                                    + "请先停掉那个实例，或在环境控制台点「重启」");
+                    return false;
+                }
                 setPhase(ctx, Phase.RUNNING, "已接管运行中的 dsh 后端");
                 return true;
             }
@@ -329,6 +358,25 @@ public final class DshBackend {
         pumpThread = t;
         t.start();
 
+        // 退出监视：非预期退出时给出确切的退出码，而不是让 UI 一直停在「启动中」
+        Thread watcher = new Thread(() -> {
+            int code;
+            try {
+                code = p.waitFor();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+            if (stopRequested) return;
+            portAlive = false;
+            if (phase == Phase.STARTING || phase == Phase.RUNNING) {
+                setPhase(ctx, Phase.ERROR,
+                        "dsh 后端进程已退出（exit=" + code + "），详见运行日志");
+            }
+        }, "dsh-backend-watch");
+        watcher.setDaemon(true);
+        watcher.start();
+
         // 等 PID 文件（由 guest 脚本写入）
         for (int i = 0; i < 40 && pid < 0; i++) {
             pid = readGuestPid(ctx);
@@ -418,6 +466,67 @@ public final class DshBackend {
                 }
             }
         }
+    }
+
+    /**
+     * 身份探测：3081 上跑的是不是 dsh 后端。
+     *
+     * <p>只做裸 TCP 探测会把「恰好占用 3081 的其它服务」误判成自己的后端并直接接管，
+     * 之后所有 API 调用都会莫名失败。dsh 的根路径有稳定特征：
+     * <ul>
+     *   <li>未鉴权时 401，响应体是 {@code dsh web authentication required; …}；</li>
+     *   <li>带有效 Cookie 时 200/303。</li>
+     * </ul>
+     * 因此以「401 且响应体含 dsh」或「200/303」作为判定依据。
+     */
+    public boolean probeDsh(Context ctx) {
+        HttpURLConnection conn = null;
+        try {
+            URL url = new URL(ProrootEnv.BASE_URL + "/");
+            conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("GET");
+            conn.setInstanceFollowRedirects(false);
+            conn.setConnectTimeout(2500);
+            conn.setReadTimeout(2500);
+            conn.setRequestProperty("Connection", "close");
+            String ck = DshAuth.cookieHeader();
+            if (ck != null && !ck.isEmpty()) {
+                conn.setRequestProperty("Cookie", ck);
+            }
+            int code = conn.getResponseCode();
+            if (code == 200 || code == 303) {
+                drainQuietly(conn);
+                return true;
+            }
+            if (code == 401) {
+                String body = readQuietly(conn);
+                return body != null && body.contains("dsh");
+            }
+            drainQuietly(conn);
+            return false;
+        } catch (IOException e) {
+            return false;
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
+    }
+
+    private static String readQuietly(HttpURLConnection conn) {
+        try {
+            InputStream is = conn.getErrorStream();
+            if (is == null) is = conn.getInputStream();
+            if (is == null) return null;
+            byte[] buf = new byte[512];
+            int n = is.read(buf);
+            is.close();
+            return n > 0 ? new String(buf, 0, n, java.nio.charset.StandardCharsets.UTF_8) : null;
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    private static void drainQuietly(HttpURLConnection conn) {
+        readQuietly(conn);
     }
 
     /** 刷新 portAlive 并广播（供 UI 定时刷新用）。 */
