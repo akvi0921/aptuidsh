@@ -51,6 +51,9 @@ public final class ApiCompat {
 
     // ------------------------------------------------------------------ 方法名映射
 
+    /** 合成方法标记（不属于服务端，由 {@link DshClient} 本地组装）。 */
+    public static final String SYNTHETIC_HOST_DESCRIBE = "$synthetic/host.describe";
+
     private static final Map<String, String> METHOD = new HashMap<>();
 
     static {
@@ -121,9 +124,6 @@ public final class ApiCompat {
         METHOD.put("commands/list", "commands/list");
         METHOD.put("commands/execute", "commands/execute");
     }
-
-    /** 合成方法标记（不属于服务端，由 {@link DshClient} 本地组装）。 */
-    public static final String SYNTHETIC_HOST_DESCRIBE = "$synthetic/host.describe";
 
     /** 旧方法名 → 新方法名（未知的按原样透传）。 */
     public static String mapMethod(String oldPath) {
@@ -420,13 +420,13 @@ public final class ApiCompat {
         } catch (JSONException e) {
             throw new IllegalStateException("ApiCompat.buildArgs failed for " + oldPath, e);
         }
-        JSONObject payload = new JSONObject();
+        JSONObject wrapped = new JSONObject();
         try {
-            payload.put("args", args);
+            wrapped.put("args", args);
         } catch (JSONException e) {
             throw new IllegalStateException("ApiCompat: wrap args failed", e);
         }
-        return payload;
+        return wrapped;
     }
 
     private static void copyIfPresent(JSONObject from, JSONObject to, String key) throws JSONException {
