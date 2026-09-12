@@ -365,14 +365,21 @@ public final class DshBackend {
         File rootfs = ProrootEnv.rootfsDir(ctx);
         String script = buildGuestScript();
 
-        ProcessBuilder pb = new ProcessBuilder(
-                launcher,
-                "-r", rootfs.getAbsolutePath(),
-                "-b", ProrootEnv.HOST_SDCARD + ":" + ProrootEnv.GUEST_SDCARD,
-                "-0",
-                "--link2symlink",
-                "-w", ProrootEnv.GUEST_HOME,
-                "/bin/sh", "-c", script);
+        java.util.List<String> argv = new java.util.ArrayList<>();
+        for (String a : ProrootEnv.launcherArgv(ctx)) argv.add(a);
+        argv.add("-r");
+        argv.add(rootfs.getAbsolutePath());
+        argv.add("-b");
+        argv.add(ProrootEnv.HOST_SDCARD + ":" + ProrootEnv.GUEST_SDCARD);
+        argv.add("-0");
+        argv.add("--link2symlink");
+        argv.add("-w");
+        argv.add(ProrootEnv.GUEST_HOME);
+        argv.add("/bin/sh");
+        argv.add("-c");
+        argv.add(script);
+
+        ProcessBuilder pb = new ProcessBuilder(argv);
 
         // 干净环境：只注入 Ubuntu 需要的最小集合。
         // 必须清空——宿主环境里的 PREFIX 等变量会透传进 guest，把 npm 的全局前缀
@@ -384,6 +391,8 @@ public final class DshBackend {
         pb.environment().put("LANG", "C.UTF-8");
         pb.environment().put("TMPDIR", "/tmp");
         pb.environment().put("PROROOT_TMP_DIR", ProrootEnv.tmpDir(ctx).getAbsolutePath());
+        // linker64 后备模式需要显式给出 proroot 运行时库路径
+        ProrootEnv.applyProrootEnv(pb, ctx);
         // Android 平台变量：bionic 与部分系统调用路径会读它们，补上以免出现平台相关怪象
         pb.environment().put("ANDROID_ROOT", "/system");
         pb.environment().put("ANDROID_DATA", "/data");
@@ -391,7 +400,7 @@ public final class DshBackend {
         pb.directory(rootfs);
 
         clearLogFile(ctx);
-        EnvLog.i("exec: " + launcher + " -r " + rootfs.getAbsolutePath()
+        EnvLog.i("exec: " + String.join(" ", argv).substring(0, Math.min(240, String.join(" ", argv).length()))
                 + " -b " + ProrootEnv.HOST_SDCARD + ":" + ProrootEnv.GUEST_SDCARD
                 + " -0 --link2symlink -w " + ProrootEnv.GUEST_HOME);
         Process p;

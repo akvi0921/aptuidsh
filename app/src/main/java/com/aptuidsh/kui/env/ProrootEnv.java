@@ -201,6 +201,87 @@ public final class ProrootEnv {
         }
     }
 
+    // ------------------------------------------------------------------ 启动方式
+
+    /**
+     * 是否改用 {@code /system/bin/linker64} 加载启动器。
+     *
+     * <h3>为什么需要这条后备路径</h3>
+     * Android 10+ 默认禁止应用执行自己数据目录里的文件；常规做法是把 proroot 放进
+     * {@code jniLibs} 由系统解包到 {@code nativeLibraryDir}（唯一允许 exec 的位置）。
+     * 但部分 ROM（实测关注华为 EMUI）对该路径也做了限制，一旦被拒，整个方案就死了。
+     *
+     * <p>后备思路：<b>不去 execve 我们自己的文件</b>，而是执行系统二进制
+     * {@code /system/bin/linker64}，把 proroot 启动器当作参数交给它加载。
+     * 内核只对 linker64 做 execve（系统路径恒定允许），我们的文件只是被
+     * {@code open()+mmap()} 读取——只要可读即可，不需要可执行。
+     *
+     * <p>实测（本机验证）：链路完全可用，guest 能正常跑起来并输出 dsh 版本。
+     * 唯一前提是显式给出 proroot 的运行时库路径——启动器本来靠 {@code /proc/self/exe}
+     * 的同级目录自动发现，而经 linker64 启动时那个位置指向 linker 自己，
+     * 必须用 {@code PROROOT_*} 环境变量覆盖。
+     */
+    private static volatile boolean useLinker64;
+
+    /** 是否处于 linker64 后备模式。 */
+    public static boolean isLinkerMode() {
+        return useLinker64;
+    }
+
+    /** linker64 后备模式下启动器与运行时库的存放目录（只要可读）。 */
+    public static File linkerLibDir(Context ctx) {
+        return new File(ctx.getFilesDir(), "proroot-libs");
+    }
+
+    private static String linkerPath() {
+        for (String p : new String[]{"/system/bin/linker64",
+                "/apex/com.android.runtime/bin/linker64"}) {
+            if (new File(p).exists()) return p;
+        }
+        return "/system/bin/linker64";
+    }
+
+    /** 组装启动器命令行（自动带上当前模式的正确前缀）。 */
+    public static String[] launcherArgv(Context ctx) {
+        if (useLinker64) {
+            return new String[]{linkerPath(),
+                    new File(linkerLibDir(ctx), PROROOT_LAUNCHER).getAbsolutePath()};
+        }
+        return new String[]{launcherPath(ctx)};
+    }
+
+    /** 把 5 个 .so 从 nativeLibraryDir 复制到可读目录（linker 模式只需可读）。 */
+    private static void stageLinkerLibs(Context ctx) throws IOException {
+        File dir = linkerLibDir(ctx);
+        //noinspection ResultOfMethodCallIgnored
+        dir.mkdirs();
+        File srcDir = new File(ctx.getApplicationInfo().nativeLibraryDir);
+        for (String lib : PROROOT_LIBS) {
+            File src = new File(srcDir, lib);
+            File dst = new File(dir, lib);
+            if (dst.exists() && dst.length() == src.length()) continue;
+            if (!src.exists()) throw new IOException("缺少 " + lib);
+            try (java.io.FileInputStream in = new java.io.FileInputStream(src);
+                 java.io.FileOutputStream out = new java.io.FileOutputStream(dst, false)) {
+                byte[] buf = new byte[1 << 16];
+                int n;
+                while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
+            }
+        }
+        EnvLog.i("已暂存 proroot 运行时库到 " + dir.getAbsolutePath());
+    }
+
+    /** linker64 模式下注入 PROROOT_* 路径（否则启动器会去 /proc/self/exe 旁边找）。 */
+    public static void applyProrootEnv(ProcessBuilder pb, Context ctx) {
+        if (!useLinker64 || ctx == null) return;
+        File d = linkerLibDir(ctx);
+        pb.environment().put("PROROOT_LIB_PATH", new File(d, "libproroot-runtime.so").getAbsolutePath());
+        pb.environment().put("PROROOT_TRAMPOLINE_PATH", new File(d, "libproroot-bridge.so").getAbsolutePath());
+        pb.environment().put("PROROOT_LINKER_PATH", new File(d, "libproroot-linker.so").getAbsolutePath());
+        pb.environment().put("PROROOT_STUB_LOADER", new File(d, "libproroot-stub-loader.so").getAbsolutePath());
+        pb.environment().put("PROROOT_GUEST_EXE", new File(d, PROROOT_LAUNCHER).getAbsolutePath());
+    }
+
     // ------------------------------------------------------------------ 事实核查
 
     /**
@@ -235,6 +316,8 @@ public final class ProrootEnv {
         long free = ctx.getFilesDir().getUsableSpace();
         out.add("filesDir 可用空间 = " + (free >> 20) + "MB（安装约需 670MB）");
         out.add("需安装 = " + !isInstalled(ctx));
+        out.add("启动方式 = " + (useLinker64 ? "linker64 后备" : "直接 exec(nativeLibraryDir)"));
+        out.add("linker64 = " + linkerPath() + "，存在 = " + new File(linkerPath()).exists());
         return out;
     }
 
@@ -330,12 +413,36 @@ public final class ProrootEnv {
         }
         EnvLog.i("启动器: " + launcher + "，可读=" + launcher.canRead()
                 + " 可执行=" + launcher.canExecute() + " 大小=" + launcher.length());
-        if (!launcher.canExecute()) {
-            EnvLog.e("启动器不可执行（Android 10+ 必须从 nativeLibraryDir 执行）: " + launcher, null);
-            return new Smoke(false, "启动器不可执行（权限位未置位）: " + launcher, "");
+
+        // 第一步：常规方式（nativeLibraryDir 直接 exec）
+        if (launcher.canExecute()) {
+            Smoke direct = runCaptured(new String[]{launcher.getAbsolutePath()}, null, 12_000L,
+                    "启动器可执行", "启动器无法执行");
+            if (direct.ok) {
+                useLinker64 = false;
+                EnvLog.i("启动方式 = 直接 exec（nativeLibraryDir）");
+                return direct;
+            }
+            EnvLog.w("直接 exec 失败：" + direct.summary + "，改用 linker64 后备路径");
+        } else {
+            EnvLog.w("nativeLibraryDir 中的启动器没有可执行权限，改用 linker64 后备路径");
         }
-        return runCaptured(new String[]{launcher.getAbsolutePath()}, null, 12_000L,
-                "启动器可执行", "启动器无法执行");
+
+        // 第二步：linker64 后备（不使用 execve 我们的文件）
+        try {
+            stageLinkerLibs(ctx);
+        } catch (IOException e) {
+            EnvLog.e("暂存 proroot 运行时库失败", e);
+            return new Smoke(false, "无法准备 linker64 后备运行时库：" + e.getMessage(), "");
+        }
+        useLinker64 = true;
+        Smoke viaLinker = runCaptured(launcherArgv(ctx), null, 15_000L,
+                "启动器可执行（linker64 后备）", "启动器无法执行（linker64 后备也失败）");
+        EnvLog.i("启动方式 = linker64 后备，ok=" + viaLinker.ok);
+        if (!viaLinker.ok) {
+            useLinker64 = false;
+        }
+        return viaLinker;
     }
 
     /**
@@ -348,16 +455,19 @@ public final class ProrootEnv {
             EnvLog.w("guest 自检跳过：尚未安装");
             return new Smoke(false, "尚未安装内置环境", "");
         }
-        File launcher = new File(launcherPath(ctx));
-        String[] cmd = {
-                launcher.getAbsolutePath(),
-                "-r", rootfsDir(ctx).getAbsolutePath(),
-                "-0", "--link2symlink",
-                "-w", GUEST_HOME,
-                "/bin/sh", "-c",
-                "echo APTUIDSH-SMOKE-OK; uname -m; /usr/local/bin/node -v; /usr/local/bin/dsh --version",
-        };
-        return runCaptured(cmd, ctx, 30_000L, "guest 自检通过", "guest 自检失败");
+        java.util.List<String> argv = new java.util.ArrayList<>();
+        for (String a : launcherArgv(ctx)) argv.add(a);
+        argv.add("-r");
+        argv.add(rootfsDir(ctx).getAbsolutePath());
+        argv.add("-0");
+        argv.add("--link2symlink");
+        argv.add("-w");
+        argv.add(GUEST_HOME);
+        argv.add("/bin/sh");
+        argv.add("-c");
+        argv.add("echo APTUIDSH-SMOKE-OK; uname -m; /usr/local/bin/node -v; /usr/local/bin/dsh --version");
+        return runCaptured(argv.toArray(new String[0]), ctx, 30_000L,
+                "guest 自检通过", "guest 自检失败");
     }
 
     /** 以干净环境执行命令并捕获输出（与后端启动使用同一套环境规则）。 */
@@ -375,6 +485,7 @@ public final class ProrootEnv {
         pb.environment().put("ANDROID_DATA", "/data");
         if (ctx != null) {
             pb.environment().put("PROROOT_TMP_DIR", tmpDir(ctx).getAbsolutePath());
+            applyProrootEnv(pb, ctx);
             pb.directory(rootfsDir(ctx));
         }
         pb.redirectErrorStream(true);
