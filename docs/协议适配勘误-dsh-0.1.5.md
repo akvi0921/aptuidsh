@@ -291,3 +291,32 @@ POST /api/$events/result
 开一条逻辑流 → 读第一个 item → 关闭），再把 `records[].event` 还原成旧版
 `{events:[…], hasMore}` 事件账本，上层 UI 零改动。
 这与官方客户端「先 follow 拿快照、再按 beforeSeq 往前翻页」的做法一致。
+
+---
+
+## 九、适配层缺陷表（由 `tools/jvmtest` 实机测试台抓出并修复）
+
+`tools/jvmtest/run.sh` 会直接编译运行 APP 里**真实的** `ApiCompat.java` 与
+`MuxClient.java`，把生成的请求逐个打到真实后端。首轮跑出 8 项失败，其中 5 项是真缺陷：
+
+| # | 缺陷 | 服务端原始报错 | 后果 | 修复 |
+|---|---|---|---|---|
+| 1 | `MuxClient` 用 `new URL("ws://…")` 解析地址 | `java.net.MalformedURLException: unknown protocol: ws` | **会话历史必然崩溃**（java.net.URL 没有 ws 协议处理器） | 保持 http 形式解析 host/port，握手只用这两个值 + 固定路径 |
+| 2 | `goals/*` 用 `sessionId` 寻址 | `missing "agentId"; unexpected "sessionId"` | 目标（goal）功能全废 | 改用 `agentId` |
+| 3 | `subagents/list` 把参数包进 `request` | `missing "parentSessionId"; unexpected "request"` | 子代理列表全废 | 改为扁平 `parentSessionId` |
+| 4 | `commands/list` 又包了一层 `args` | `missing "agentId"; unexpected "args"` | 斜杠命令列表全废 | 平铺内层对象；`images` → `submittedAttachments` |
+| 5 | `llm/discoverModels` 只传 `settingsNs` | `missing "request"` | 模型发现不可用 | 补 `request` 对象 |
+
+另外 3 项是**测试台自身或部署能力**的问题，非适配层缺陷：
+- `session.search`：该部署把会话查询索引配成 `openAt: "never"`，搜索被显式禁用；
+- `llm/discoverModels` 修好形状后仍报 `llm/model-discovery-rejected`——
+  错误码已从 `gateway/arguments-invalid` 变为领域错误，说明 schema 已正确，
+  是该命名空间没有注册模型发现能力；
+- `session.history` 在 `ApiCompat` 里必须标成**合成方法**
+  （`$synthetic/session.history`），否则方法表与实际实现不一致，容易埋雷。
+
+最终状态：**23 项全部通过**（含 N/A 标注）。
+
+### 教训
+方法名与形参名的漂移肉眼极难发现，而一旦写错，在真机上的表现是「某个功能静默失效」。
+因此**升级 dsh 版本后第一件事就是跑这个测试台**。
