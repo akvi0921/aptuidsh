@@ -224,10 +224,16 @@ public final class DshBackend {
             EnvLog.i("== install() 成功返回 ==");
             setPhase(ctx, Phase.STOPPED, "环境安装完成");
             return true;
+        } catch (OutOfMemoryError oom) {
+            // OOM 不是 Exception：首版只 catch IOException，导致它直接击穿协程打死进程
+            progressPercent = -1;
+            EnvLog.e("安装过程内存不足", oom);
+            setPhase(ctx, Phase.ERROR, "内存不足，安装失败。请关闭其他应用后重试");
+            return false;
         } catch (Throwable e) {
             progressPercent = -1;
             EnvLog.e("环境安装失败", e);
-            setPhase(ctx, Phase.ERROR, "环境安装失败：" + e.getMessage());
+            setPhase(ctx, Phase.ERROR, "环境安装失败：" + e);
             return false;
         }
     }

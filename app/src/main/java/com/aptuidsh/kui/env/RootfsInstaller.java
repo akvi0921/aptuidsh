@@ -101,6 +101,13 @@ public final class RootfsInstaller {
                         lastPct = pct;
                         report(progress, "释放内置运行环境 " + (copied >> 20) + "/" + (total >> 20) + " MB", pct);
                     }
+                } else {
+                    // 尺寸未知时也要有反馈，否则界面看起来像卡死
+                    int mb = (int) (copied >> 20);
+                    if (mb != lastPct) {
+                        lastPct = mb;
+                        report(progress, "释放内置运行环境 " + mb + " MB…", -1);
+                    }
                 }
             }
             out.flush();
@@ -237,14 +244,28 @@ public final class RootfsInstaller {
         }
     }
 
+    /**
+     * 读取内置镜像的未压缩尺寸，用于进度条。
+     *
+     * <p><b>为什么直接从 APK 的 zip 条目读</b>：首版写成
+     * {@code ctx.getAssets().open(name, ACCESS_UNKNOWN).available()}。
+     * 对未压缩资产，{@code ACCESS_UNKNOWN} 可能让 AssetManager 把整个 77MB
+     * 资产映射甚至读入内存；而 {@code OutOfMemoryError} <b>不是 IOException</b>，
+     * 会直接击穿上层 catch 把进程打死——现象就是「点了安装没反应、随后 APP 消失」。
+     * 读 zip 条目零内存且精确。
+     */
     private static long assetSize(Context ctx) {
-        try (InputStream in = ctx.getAssets().open(ProrootEnv.ROOTFS_ASSET,
-                AssetManager.ACCESS_UNKNOWN)) {
-            return in.available();
-        } catch (IOException e) {
-            EnvLog.e("读取 asset 大小失败", e);
-            return -1;
+        try (java.util.zip.ZipFile zip =
+                     new java.util.zip.ZipFile(ctx.getApplicationInfo().sourceDir)) {
+            java.util.zip.ZipEntry e = zip.getEntry("assets/" + ProrootEnv.ROOTFS_ASSET);
+            if (e != null) {
+                return e.getSize();
+            }
+            EnvLog.w("APK 内找不到 assets/" + ProrootEnv.ROOTFS_ASSET);
+        } catch (IOException ex) {
+            EnvLog.e("读取 APK 内 asset 尺寸失败", ex);
         }
+        return -1L;
     }
 
     private static void checkCancelled() throws IOException {
