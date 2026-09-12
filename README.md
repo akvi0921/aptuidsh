@@ -162,3 +162,29 @@ export JAVA_HOME=$PREFIX
 - dsh 自 0.1.5 起引入浏览器鉴权，原生客户端依赖 `launchToken`；
   若 dsh 进程不是由本 APP 拉起（例如手动在 guest 里启动），Cookie 需要重新交换一次。
 - rootfs 解压后占用约 585 MB，安装前请确认存储空间。
+
+---
+
+## 九、首次启动失败时怎么定位
+
+「环境控制台」（首屏 → 环境控制台）里有 **运行自检** 按钮，它会真实执行两条命令并把原始输出贴出来：
+
+1. **启动器自检**：直接 exec `nativeLibraryDir/libproroot.so`（不带参数，它打印用法后退出）。
+   这一步专门用来验证 Android 10+ 那条硬规则——**只允许 exec nativeLibraryDir 里的文件**
+   （应用数据目录被 SELinux 禁止 exec）。装 585MB 之前会先跑它，不通过就直接报错，不会白装。
+2. **Guest 自检**：进 rootfs 跑
+   `/bin/sh -c 'echo APTUIDSH-SMOKE-OK; uname -m; /usr/local/bin/node -v; /usr/local/bin/dsh --version'`，
+   验证 proroot + rootfs + 动态链接 + Node + dsh 整条链。
+
+常见失败与含义：
+
+| 现象 | 含义 / 处理 |
+|---|---|
+| `无法执行内置 proroot 启动器：Permission denied` | nativeLibraryDir 里没有真实文件。检查 APK 是否为 arm64、`.so` 是否为 Deflated（安装时才会解包） |
+| `自检未通过：guest 自检失败（exit=…）` | rootfs 不完整；到控制台点「重装环境」 |
+| `启动超时（90 秒内端口未就绪）` | 看运行日志尾部；常见原因是 DNS 不通（APP 会自动写入当前网络的 DNS 到 guest 的 `/etc/resolv.conf`） |
+| `dsh 后端进程已退出（exit=N）` | 进程起来了又挂了，退出码 + 日志在控制台里 |
+| `3081 端口已被另一个 dsh 实例占用，且无法取得其鉴权凭据` | 端口上有别人的 dsh（例如 Termux 环境误起在 3081）；先停掉再点「重启」 |
+
+> APP 用 **HTTP 身份探测**（401 且响应体含 `dsh`，或 200/303）而不是裸 TCP 判断 3081 上是不是自己的后端，
+> 避免把恰好占用该端口的其它服务误当自己的实例接管。
