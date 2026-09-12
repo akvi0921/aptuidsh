@@ -1207,9 +1207,28 @@ public class DshClient {
                     for (int i = 0; i < records.length(); i++) {
                         JSONObject rec = records.optJSONObject(i);
                         if (rec == null) continue;
-                        JSONObject ev = rec.optJSONObject("event");
-                        if (ev != null) events.put(ev);
+                        // 必须原样保留记录外壳 {"type":"event","event":{…}}：
+                        // 上层 SessionLog.fromHistory 是按 events[i].optJSONObject("event") 取事件的，
+                        // 早先这里把外壳剥掉只放裸事件，导致历史解析全部落空、会话打开后是空的。
+                        if (rec.optJSONObject("event") != null) {
+                            events.put(rec);
+                        }
                     }
+                }
+                // 会话实时配置/统计来自快照的 projections（sessionStats / contextPressure /
+                // permissions / tokenUsage），上层是照 projections.values.* 读的，缺了就没有状态栏。
+                JSONObject projections = snapshot.optJSONObject("projections");
+                if (projections != null) {
+                    out.put("projections", projections);
+                }
+                if (snapshot.has("cursor")) {
+                    out.put("cursor", snapshot.opt("cursor"));
+                }
+                JSONObject header = snapshot.optJSONObject("header");
+                if (header != null) {
+                    out.put("header", header);
+                    String sid = header.optString("id", "");
+                    if (!sid.isEmpty()) out.put("sessionId", sid);
                 }
             }
         }
