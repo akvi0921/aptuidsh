@@ -54,7 +54,7 @@ class AptuidshApp : Application() {
                     append("APTUIDSH 崩溃报告\n")
                     append("时间: ").append(java.util.Date()).append('\n')
                     append("线程: ").append(thread.name).append('\n')
-                    append("版本: ").append(versionName).append('\n')
+                    append("版本: ").append(versionName()).append('\n')
                     append("设备: ").append(android.os.Build.MANUFACTURER).append(' ')
                     append(android.os.Build.MODEL).append(" / Android ")
                     append(android.os.Build.VERSION.RELEASE)
