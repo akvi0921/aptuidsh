@@ -1,0 +1,21 @@
+.gradle/
+build/
+app/build/
+.kotlin/
+local.properties
+*.iml
+.idea/
+captures/
+.externalNativeBuild/
+.cxx/
+*.log
+
+# ---- 构建产物：不要把 78MB 的 rootfs 镜像与 proroot 二进制提交进 Git ----
+# 两者都由 tools/ 下的脚本可重复生成（见 README「镜像与二进制如何重建」）
+app/src/main/assets/rootfs.tar.xz
+app/src/main/jniLibs/arm64-v8a/*.so
+
+# 备份/临时
+*.bak
+*.orig
+*.rej

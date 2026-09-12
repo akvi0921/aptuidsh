@@ -1,0 +1,21 @@
+// ===== aptuidsh 项目设置:插件仓库 + 依赖仓库 + 模块声明 =====
+// 适配 Gradle 8.13 与 AGP 8.7.3 + Kotlin 2.0.21 (Termux 环境已验证可用)
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+dependencyResolutionManagement {
+    // 禁止子项目自行声明仓库,统一在此配置
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.name = "aptuidsh"
+include ':app'
