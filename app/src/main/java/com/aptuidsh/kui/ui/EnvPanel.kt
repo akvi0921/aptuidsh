@@ -245,6 +245,8 @@ fun EnvConsoleScreen(onBack: () -> Unit) {
     var logs by remember { mutableStateOf(EnvLog.lines()) }
     var smokeResult by remember { mutableStateOf<String?>(null) }
     var toast by remember { mutableStateOf<String?>(null) }
+    // 日志筛选：RPC 明细会让日志很长，需要能单独看「内置 dsh 的启动输出」
+    var onlyDsh by remember { mutableStateOf(false) }
     val clipboard = LocalClipboardManager.current
     val logScroll = rememberScrollState()
     val busy = status.phase == DshBackend.Phase.INSTALLING
@@ -261,7 +263,8 @@ fun EnvConsoleScreen(onBack: () -> Unit) {
     // 日志自动滚到底：日志区固定高度，不自动滚会一直停在最早几行，
     // 看起来像"日志没输出"（首版就吃过这个亏）
     LaunchedEffect(logs.size) {
-        if (logs.isNotEmpty()) {
+        // 只在"用户本来就在底部"时自动下滚；用户往上翻阅历史时不要把他拽回去
+        if (logs.isNotEmpty() && logScroll.value >= logScroll.maxValue - 48) {
             logScroll.animateScrollTo(logScroll.maxValue)
         }
     }
@@ -350,6 +353,50 @@ fun EnvConsoleScreen(onBack: () -> Unit) {
                         },
                     ) { Text("重启") }
                 }
+
+                // ===== 复制 / 导出：真机排障的第一手手段 =====
+                Spacer(Modifier.height(10.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                Spacer(Modifier.height(10.dp))
+                Button(
+                    onClick = {
+                        val text = logs.joinToString("\n")
+                        clipboard.setText(AnnotatedString(text))
+                        toast = "已复制 " + logs.size + " 行日志到剪贴板，可直接粘贴发送"
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("一键复制全部日志") }
+                Spacer(Modifier.height(6.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = {
+                            val crash = ProrootEnv.crashText(context)
+                            if (crash.isNullOrEmpty()) {
+                                toast = "暂无崩溃报告（" + ProrootEnv.crashFile(context).absolutePath + "）"
+                            } else {
+                                clipboard.setText(AnnotatedString(crash))
+                                toast = "已复制崩溃报告（" + crash.length + " 字符）"
+                            }
+                        },
+                    ) { Text("复制崩溃报告") }
+                    OutlinedButton(
+                        onClick = {
+                            val f = ProrootEnv.writeEnvReport(context)
+                            toast = if (f == null) "导出失败" else "已导出到 " + f.absolutePath
+                        },
+                    ) { Text("导出完整报告") }
+                }
+                if (toast != null) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = toast!!,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+
+                Spacer(Modifier.height(10.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(
@@ -412,10 +459,19 @@ fun EnvConsoleScreen(onBack: () -> Unit) {
         }
         Spacer(Modifier.height(12.dp))
         Text(
-            text = "全过程日志（含内置 dsh 启动输出）· 共 " + logs.size + " 行",
+            text = if (onlyDsh) "内置 dsh 启动日志" else "全过程日志 · 共 " + logs.size + " 行",
             style = MaterialTheme.typography.labelLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = { onlyDsh = !onlyDsh }) {
+                Text(if (onlyDsh) "显示全部日志" else "只看 dsh 启动日志")
+            }
+            OutlinedButton(onClick = { scope.launch { logScroll.animateScrollTo(logScroll.maxValue) } }) {
+                Text("跳到最新")
+            }
+        }
         Spacer(Modifier.height(6.dp))
         Card(
             shape = RoundedCornerShape(10.dp),
@@ -428,7 +484,18 @@ fun EnvConsoleScreen(onBack: () -> Unit) {
                     .padding(10.dp)
                     .verticalScroll(logScroll),
             ) {
-                val text = logs.takeLast(600).joinToString("\n")
+                val source = if (onlyDsh) {
+                    // dsh 进程 stdout、启动阶段与鉴权链路——排查"后端到底起没起、怎么起的"时只看这些
+                    logs.filter {
+                        it.contains("[dsh]") || it.contains("== start") || it.contains("== install")
+                                || it.contains("鉴权交换") || it.contains("端口 3081")
+                                || it.contains("guest 自检") || it.contains("exec(")
+                                || it.contains("已启动") || it.contains("唤醒锁")
+                    }
+                } else {
+                    logs
+                }
+                val text = source.takeLast(600).joinToString("\n")
                 Text(
                     text = "日志文件: " + EnvLog.file(context).absolutePath + "\n\n" + text.ifEmpty { "（暂无输出）" },
                     style = MaterialTheme.typography.labelSmall,

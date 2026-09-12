@@ -117,9 +117,25 @@ info "6/7 清理缓存与跨平台二进制"
 NM=rootfs/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules
 rm -rf rootfs/root/.npm rootfs/tmp/* rootfs/var/cache/apt rootfs/var/lib/apt/lists
 rm -rf rootfs/usr/share/doc rootfs/usr/share/man rootfs/usr/share/info
-# 绝不能把调试期的凭据打进发行镜像
+# 绝不能把调试期的凭据与测试会话打进发行镜像。
+# 实证：某次构建漏了这步，发行镜像里带进了 53 条测试会话和宿主的 API Key，
+# 用户装上后会看到不属于自己的会话、并且直接用上了内置的密钥。
 rm -rf rootfs/root/.dsh/sessions rootfs/root/.dsh/storages \
-       rootfs/root/.dsh/.credentials.yaml rootfs/root/.dsh/.anonymous-user-id
+       rootfs/root/.dsh/.credentials.yaml rootfs/root/.dsh/.anonymous-user-id \
+       rootfs/root/.dsh/attachments rootfs/root/.dsh/llm-* rootfs/root/.dsh/.agent-presets
+# 逐项自检：任何一项残留就中止构建
+for leak in root/.dsh/sessions root/.dsh/storages root/.dsh/.credentials.yaml \
+            root/.dsh/.anonymous-user-id root/.dsh/attachments; do
+  if [ -e "rootfs/$leak" ]; then
+    echo "[!] 发行镜像卫生检查失败：仍存在 $leak" >&2
+    exit 1
+  fi
+done
+if grep -rqs "sk-" rootfs/root/.dsh 2>/dev/null; then
+  echo "[!] 发行镜像卫生检查失败：root/.dsh 内仍可搜到 API Key" >&2
+  exit 1
+fi
+info "发行镜像卫生检查通过（无凭据 / 无测试会话）"
 # 只保留 linux-arm64 的预编译产物
 rm -rf "$NM"/node-pty/prebuilds/darwin-arm64 "$NM"/node-pty/prebuilds/darwin-x64 \
        "$NM"/node-pty/prebuilds/win32-arm64 "$NM"/node-pty/prebuilds/win32-x64 \
