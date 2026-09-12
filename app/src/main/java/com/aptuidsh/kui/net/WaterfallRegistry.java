@@ -43,10 +43,10 @@ public final class WaterfallRegistry {
     private static volatile String clientId;
 
     /** eventId → 待应答事件（保持插入顺序，便于淘汰最旧的）。 */
-    private static final Map<String, Entry> PENDING =
-            new LinkedHashMap<String, Entry>(16, 0.75f, false) {
+    private static final Map<String, Pending> PENDING =
+            new LinkedHashMap<String, Pending>(16, 0.75f, false) {
                 @Override
-                protected boolean removeEldestEntry(Map.Entry<String, Entry> eldest) {
+                protected boolean removeEldestEntry(Map.Entry<String, Pending> eldest) {
                     return size() > MAX_ENTRIES;
                 }
             };
@@ -55,7 +55,7 @@ public final class WaterfallRegistry {
     }
 
     /** 一条待应答的 waterfall 事件。 */
-    public static final class Entry {
+    public static final class Pending {
         /** 事件名，如 {@code user-questions/request}、{@code approval/request}。 */
         public final String event;
         /** 归属会话（服务端字段名 agentId）。 */
@@ -63,7 +63,7 @@ public final class WaterfallRegistry {
         /** 原始 request 载荷。 */
         public final JSONObject request;
 
-        Entry(String event, String agentId, JSONObject request) {
+        Pending(String event, String agentId, JSONObject request) {
             this.event = event;
             this.agentId = agentId;
             this.request = request;
@@ -85,12 +85,12 @@ public final class WaterfallRegistry {
     public static void record(String eventId, String event, String agentId, JSONObject request) {
         if (eventId == null || eventId.isEmpty()) return;
         synchronized (PENDING) {
-            PENDING.put(eventId, new Entry(event, agentId, request));
+            PENDING.put(eventId, new Pending(event, agentId, request));
         }
     }
 
     /** 取一条待应答事件（不删除——事件可能被重放）。 */
-    public static Entry get(String eventId) {
+    public static Pending get(String eventId) {
         if (eventId == null) return null;
         synchronized (PENDING) {
             return PENDING.get(eventId);
@@ -109,8 +109,8 @@ public final class WaterfallRegistry {
     public static String findEventId(String event, String agentId) {
         synchronized (PENDING) {
             String found = null;
-            for (Map.Entry<String, Entry> e : PENDING.entrySet()) {
-                Entry v = e.getValue();
+            for (Map.Entry<String, Pending> e : PENDING.entrySet()) {
+                Pending v = e.getValue();
                 if (event.equals(v.event) && agentId != null && agentId.equals(v.agentId)) {
                     found = e.getKey();
                 }
