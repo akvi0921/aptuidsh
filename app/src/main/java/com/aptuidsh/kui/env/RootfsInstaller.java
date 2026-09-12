@@ -171,7 +171,11 @@ public final class RootfsInstaller {
 
     private static void runTarExtract(File archive, File root, Progress progress) throws IOException {
         // 与 Termux 端验证过的调用方式完全一致：工作目录设为 rootfs，解压归档到当前目录
-        // 必须用 gzip(-z)：Android 的 toybox tar 对 xz(-J) 是靠 exec 外部 xz 实现的，
+        // 镜像内容是 gzip 压缩的 tar，但文件名刻意用中性的 .img：
+        // AGP 对以 .gz 结尾的 asset 会在构建期**自动解压**（实测 APK 里变成了 553MB 的
+        // rootfs.tar，APK 从 137MB 涨到 166MB），换后缀即可绕开该行为。
+        //
+        // 必须用 gzip(-z) 而不是 xz(-J)：Android 的 toybox tar 对 xz 是靠 exec 外部 xz 实现的，
         // 而系统里没有 xz —— 会报 "tar: exec xz: No such file or directory"，
         // 而且 toybox 在这种情况下**仍然返回退出码 0**。gzip 是 toybox 内置实现，零外部依赖。
         EnvLog.i("执行解压: /system/bin/tar -xzf " + archive.getAbsolutePath()
