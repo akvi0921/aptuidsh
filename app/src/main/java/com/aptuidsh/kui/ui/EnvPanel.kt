@@ -482,6 +482,54 @@ fun EnvConsoleScreen(onBack: () -> Unit) {
                 Modifier
                     .fillMaxWidth()
                     .padding(10.dp)
+                    .verticalScroll(rememberScrollState()),
+            ) {
+                Text(
+                    text = "开源组件与致谢…（此块不会随日志滚动）",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+        // ===== 开源许可与致谢 =====
+        // proroot 的许可证（第 4、5 条）强制要求：随包附带许可声明，
+        // 并在「应用描述 / 关于页 / 第三方许可声明」中署名 proroot。
+        // 这里就是那个署名位置，删掉会导致分发不合规。
+        Text(
+            text = "开源许可与致谢",
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(6.dp))
+        Card(
+            shape = RoundedCornerShape(10.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(12.dp)
+                    .verticalScroll(rememberScrollState()),
+            ) {
+                Text(
+                    text = ATTRIBUTION,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+        Card(
+            shape = RoundedCornerShape(10.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+            modifier = Modifier.fillMaxWidth().weight(1f),
+        ) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(10.dp)
                     .verticalScroll(logScroll),
             ) {
                 val source = if (onlyDsh) {
@@ -506,3 +554,43 @@ fun EnvConsoleScreen(onBack: () -> Unit) {
         }
     }
 }
+
+/**
+ * 第三方组件署名。
+ *
+ * <p><b>不要删除</b>：proroot 的许可证第 4、5 条强制要求随包附带许可声明，
+ * 并在应用描述 / 关于页 / 第三方许可声明中署名 proroot。本区块即该署名位置，
+ * 完整清单见仓库 `third_party/OPEN-SOURCE.md` 与 `third_party/proroot-LICENSE.txt`。
+ */
+private const val ATTRIBUTION = """本 APP 打包了以下第三方开源/第三方组件：
+
+【proroot】rootless Linux 运行时
+Copyright (c) 2026 coderred
+https://github.com/coderredlab/proroot
+以未修改形式随本应用包分发（arm64-v8a 下 5 个 .so）。
+许可要点：不得分发修改版；未修改版仅可作为完整应用包的一部分分发；
+须随副本附带许可声明并在应用内署名 proroot。
+
+【DeepSeek Harness (dsh)】MIT License
+@deepseek-ai/dsh 0.1.5-rc.1
+
+【Node.js】MIT License
+v22.22.2 (linux-arm64)
+
+【Ubuntu Base】主要遵循 GPL / LGPL
+Ubuntu 24.04.5 LTS base arm64
+完整清单见 guest 内 /usr/share/doc/*/copyright
+
+【后端依赖（部分）】
+sharp / @img/sharp-linux-arm64 —— Apache-2.0
+node-pty —— MIT
+koffi / @koromix/koffi-linux-arm64 —— MIT
+
+【前端】
+AndroidX / Jetpack Compose / Kotlin —— Apache-2.0
+
+【运行期调用（未打包）】
+AOSP toybox（tar / kill / linker64）—— BSD-3-Clause
+PDF.js（位于 dsh 的 sidebar-documentpreview 插件内）—— Apache-2.0
+
+完整许可文本与清单见仓库 third_party/ 目录。"""
