@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -473,25 +474,6 @@ fun EnvConsoleScreen(onBack: () -> Unit) {
             }
         }
         Spacer(Modifier.height(6.dp))
-        Card(
-            shape = RoundedCornerShape(10.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-            modifier = Modifier.fillMaxWidth().weight(1f),
-        ) {
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(10.dp)
-                    .verticalScroll(rememberScrollState()),
-            ) {
-                Text(
-                    text = "开源组件与致谢…（此块不会随日志滚动）",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-        Spacer(Modifier.height(12.dp))
         // ===== 开源许可与致谢 =====
         // proroot 的许可证（第 4、5 条）强制要求：随包附带许可声明，
         // 并在「应用描述 / 关于页 / 第三方许可声明」中署名 proroot。
@@ -505,7 +487,7 @@ fun EnvConsoleScreen(onBack: () -> Unit) {
         Card(
             shape = RoundedCornerShape(10.dp),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth().heightIn(max = 150.dp),
         ) {
             Column(
                 Modifier
