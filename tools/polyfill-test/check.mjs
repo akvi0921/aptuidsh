@@ -46,58 +46,46 @@ function extract(kotlinName) {
 }
 const JS = extract('JS');
 const GUARD = extract('GUARD');
-const PROBE = extract('RESOURCE_PROBE');
+const SETTLE = extract('BOOT_SETTLE');
 
-console.log(`抽出垫片源码 ${JS.length} 字符 / 守卫 ${GUARD.length} 字符 / 取证探针 ${PROBE.length} 字符`);
+console.log(`抽出垫片源码 ${JS.length} 字符 / 守卫 ${GUARD.length} 字符 / boot 补丁 ${SETTLE.length} 字符`);
 // Kotlin 原样字符串里出现美元符号会变成模板起始符、直接编译不过；这里提前守一道
 ok('垫片源码里没有美元符号（Kotlin 原样字符串的模板起始符）',
-  !JS.includes('$') && !GUARD.includes('$') && !PROBE.includes('$'),
+  !JS.includes('$') && !GUARD.includes('$') && !SETTLE.includes('$'),
   `JS 有 ${(JS.match(/\$/g) || []).length} 个，GUARD 有 ${(GUARD.match(/\$/g) || []).length} 个，`
-  + `探针有 ${(PROBE.match(/\$/g) || []).length} 个`);
-// 取证探针是独立注入的第二个脚本：必须是合法 JS，且不能依赖任何 dsh 内部全局
-// （它要抢在 loader 队列脚本之前跑，那时页面里除了 window/document 什么都没有）。
-// 取证探针是独立注入的第二个脚本：必须是合法 JS，且在 Node 里解析不报错。
-ok('取证探针语法可解析', (() => {
-  try { new Function(PROBE); return true; } catch { return false; }
-})(), 'new Function(PROBE) 抛了');
-ok('探针覆盖「活体注册模式会原地替换 load」这个真机坑',
-  PROBE.includes('installAccessor') && PROBE.includes('origCreate.call')
-  && PROBE.includes("Object.defineProperty(loader, 'load'"),
-  '1.3.4 真机教训：只接一次 load 会数到 loadSeen=1；必须挂访问器自动接住被替换的 load');
-ok('探针直接读注册表（providers/records），不再靠计数推断',
-  PROBE.includes('r.providers') && PROBE.includes('r.records'),
-  '找不到 r.providers / r.records');
-// 1.3.5 的教训：探针**绝不能改变 dsh 的行为**，否则会把「取证」变成「制造故障」。
-// 1.3.5 曾经 (a) 把注册对象换成 `{id,factory}` 新对象、(b) 包装 remote 的挂载方法
-// 来「缓解一损俱损」，结果真机上整页 boot 失败（`web boot: 35 entries did not activate`）。
-ok('探针保持注册对象的同一性（绝不用新对象替换 registration）',
-  !/return\s*\{\s*id\s*:/.test(PROBE) && PROBE.includes("Object.defineProperty(registration, 'factory'"),
-  '探针必须就地改 factory，而不是返回 {id, factory} 新对象');
-ok('探针不改变任何 dsh 行为（无 mount 缓解、无 create 之外的替换）',
-  !PROBE.includes('mount-failed') && !PROBE.includes('fromCharCode(36)') && !PROBE.includes('mount-threw'),
-  '探针里不该再出现 $mount 缓解相关的代码');
-ok('探针量出服务级联时延（since 时间线）',
-  PROBE.includes('state.since') && PROBE.includes("mark('remoteWorkspaceFiles'"),
-  '缺少 since 时间线');
-// 真机根因：dsh 的 web boot 内核「一次性、无重试」地要求所有 entry 都是 active，
-// 而 remote.* 命名空间要等 22 个串行挂载完成才出现 —— 旧内核上这个窗口必然被撞上。
-// 1.3.7 通过 ctx.get('loader') 把 loader.await() 变成「等到名单收敛」来让检查落在窗口之后。
-ok('探针把 loader.await() 改成「等到插件名单收敛」（真机 boot 竞态的修复）',
-  PROBE.includes("ctx.get('loader')") && PROBE.includes('Promise.resolve(base).then'),
+  + `补丁有 ${(SETTLE.match(/\$/g) || []).length} 个`);
+// boot 补丁是独立注入的第二个脚本：必须是合法 JS，且在 Node 里解析不报错。
+ok('boot 补丁语法可解析', (() => {
+  try { new Function(SETTLE); return true; } catch { return false; }
+})(), 'new Function(SETTLE) 抛了');
+// 真机教训：`window.__ModuleLoader__` 是**同一个对象**，但 dsh 的 create() 会把队列模式的
+// load 原地替换成活体注册模式的 load。只接一次会接空（1.3.4 实测 loadSeen 恒为 1）。
+ok('补丁覆盖「活体注册模式会原地替换 load」这个真机坑',
+  SETTLE.includes('installAccessor') && SETTLE.includes('origCreate.call')
+  && SETTLE.includes("Object.defineProperty(loader, 'load'"),
+  '必须挂访问器自动接住被替换的 load');
+// 1.3.5 的教训：取证/补丁**绝不能额外改变 dsh 的行为**。
+// 曾把注册对象换成 {id,factory} 新对象、并包住 remote 的挂载方法来「缓解一损俱损」，
+// 结果真机整页 boot 失败。现在只允许就地改 factory，且只动一个插件。
+ok('补丁保持注册对象的同一性（绝不用新对象替换 registration）',
+  !/return\s*\{\s*id\s*:/.test(SETTLE) && SETTLE.includes("Object.defineProperty(registration, 'factory'"),
+  '必须就地改 factory，而不是返回 {id, factory} 新对象');
+ok('补丁只包装 dsh-client-resources 一个插件',
+  SETTLE.includes("var TARGET_ID = '@deepseek-ai/dsh-client-resources'")
+  && SETTLE.includes('registration.id !== TARGET_ID'),
+  '找不到 TARGET_ID 过滤');
+ok('补丁不改变 dsh 的挂载/远程语义（无 mount 缓解残留）',
+  !SETTLE.includes('mount-failed') && !SETTLE.includes('mount-threw') && !SETTLE.includes('fromCharCode(36)'),
+  '不该残留 $mount 缓解代码');
+ok('补丁把 loader.await() 改成「等到插件名单收敛」',
+  SETTLE.includes("ctxRef.get('loader')") && SETTLE.includes('Promise.resolve(base).then'),
   '找不到 loader.await 补丁');
 ok('该补丁必须有界：卡住就要放手，绝不能挂死启动',
-  PROBE.includes('Date.now() - progress > 3000') && PROBE.includes('Date.now() - t0 > 20000'),
+  SETTLE.includes('Date.now() - progress > 3000') && SETTLE.includes('Date.now() - t0 > 20000'),
   '缺少「无进展 3 秒 / 总时长 20 秒」的退让条件');
-ok('探针逐条打印注册表记录（protocol/status/holders + 现场 new URL 对照）',
-  PROBE.includes('function recs()') && PROBE.includes("rec.protocol === void 0 ? 'UNDEFINED'")
-  && PROBE.includes("parsed.hostname + '|'"),
-  '缺少逐条记录打印：这是判定 protocolOf 是否认得出地址的关键测量');
-ok('该补丁记录卡住时到底缺哪些服务（便于定位真正缺失的 provider）',
-  PROBE.includes('roster-stuck') && PROBE.includes('missingServices'),
-  '缺少 roster-stuck / missingServices');
-ok('探针抓 boot 遮罩原文（dsh 的激活失败清单）',
-  PROBE.includes('[data-dsh-boot]'),
-  '缺少 boot 遮罩抓取');
+ok('该补丁暴露只读把手给自测（counts / settle）',
+  SETTLE.includes('__aptuidshBootSettle') && SETTLE.includes('counts: counts, settle: settle'),
+  '缺少 __aptuidshBootSettle 把手');
 ok('垫片源码非空且看起来是 JS', JS.includes('Math.sumPrecise') && JS.includes('Iterator'));
 
 // -------------------------------------------- 先抓原生实现的行为做基准

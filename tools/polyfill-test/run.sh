@@ -20,10 +20,10 @@ fi
 node "$HERE/check.mjs"
 RC1=$?
 # loader.await 收敛补丁是唯一一处有意改变 dsh 行为的补丁，单独做真实计时验证
-PROBE_SRC="$(node -e '
+SETTLE_SRC="$(node -e '
 const fs=require("fs"),path=require("path");
 const kt=fs.readFileSync(path.join(process.argv[1],"..","..","app/src/main/java/com/aptuidsh/kui/WebPolyfill.kt"),"utf8");
-const m=/private const val RESOURCE_PROBE = """\n([\s\S]*?)\n"""/.exec(kt);
+X
 process.stdout.write(m ? m[1] : "");
 ' "$HERE")" node "$HERE/settle-test.mjs"
 RC2=$?
