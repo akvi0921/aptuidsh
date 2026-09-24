@@ -88,6 +88,10 @@ ok('探针把 loader.await() 改成「等到插件名单收敛」（真机 boot 
 ok('该补丁必须有界：卡住就要放手，绝不能挂死启动',
   PROBE.includes('Date.now() - progress > 3000') && PROBE.includes('Date.now() - t0 > 20000'),
   '缺少「无进展 3 秒 / 总时长 20 秒」的退让条件');
+ok('探针逐条打印注册表记录（protocol/status/holders + 现场 new URL 对照）',
+  PROBE.includes('function recs()') && PROBE.includes("rec.protocol === void 0 ? 'UNDEFINED'")
+  && PROBE.includes("parsed.hostname + '|'"),
+  '缺少逐条记录打印：这是判定 protocolOf 是否认得出地址的关键测量');
 ok('该补丁记录卡住时到底缺哪些服务（便于定位真正缺失的 provider）',
   PROBE.includes('roster-stuck') && PROBE.includes('missingServices'),
   '缺少 roster-stuck / missingServices');

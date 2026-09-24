@@ -354,7 +354,7 @@ object WebPolyfill {
   try {
     var g = window;
     if (g.__aptuidshProbe) { return; }
-    var state = g.__aptuidshProbe = { ids: [], target: [], resCtx: null, addrs: [], t0: Date.now(), since: {}, roster: null, missing: null, awaited: 0 };
+    var state = g.__aptuidshProbe = { ids: [], target: [], resCtx: null, addrs: [], t0: Date.now(), since: {}, roster: null, missing: null, awaited: 0, settle: { calls: 0, maxTotal: 0, maxPending: 0, waits: [] } };
     var WANT = { 'dsh-client-resources': 1, 'dsh-api-remotes': 1, 'dsh-api-workspace-files': 1 };
     function short(id) { return String(id).replace('@deepseek-ai/', ''); }
     function err(e) { return (e && (e.stack || e.message)) || String(e); }
@@ -569,14 +569,18 @@ object WebPolyfill {
     function settle(loader) {
       return new Promise(function (resolve) {
         var t0 = Date.now(), best = 1e9, progress = Date.now();
+        state.settle.calls += 1;
         var timer = setInterval(function () {
           var c = counts();
           state.roster = c;
           if (c === null) { clearInterval(timer); resolve(); return; }
+          if (c.total > state.settle.maxTotal) { state.settle.maxTotal = c.total; }
+          if (c.pending > state.settle.maxPending) { state.settle.maxPending = c.pending; }
           if (c.pending < best) { best = c.pending; progress = Date.now(); }
           if (c.pending === 0) {
             clearInterval(timer);
             state.missing = {};
+            state.settle.waits.push(Date.now() - t0);
             state.target.push('roster-settled+' + (Date.now() - t0) + 'ms');
             resolve();
             return;
@@ -591,7 +595,44 @@ object WebPolyfill {
         }, 50);
       });
     }
-    state.diag = { counts: counts, settle: settle, missingServices: missingServices, loaderSvc: loaderSvc };
+    /**
+     * 注册表里每一条记录的真身。
+     * 这是判定「文件打不开」的最后一块拼图：
+     *   - `proto` 是**注册表自己算出来的** protocol（undefined 就说明 protocolOf 没认出来）
+     *   - `st` 是当前 status（none / loading / live / failed）
+     *   - `u` 是探针**现场用 new URL() 再解一遍**的结果（protocol|hostname|pathLen），
+     *     用来对比「WebView 的 URL 解析」和「dsh 期望的解析」是否一致
+     * 页面标签（sidebar://xxx）天生没有 provider，属于噪音，直接跳过。
+     */
+    function recs() {
+      try {
+        var r = reg();
+        if (!r || !r.records) { return null; }
+        var out = [];
+        r.records.forEach(function (rec, addr) {
+          if (out.length >= 6) { return; }
+          if (String(addr).indexOf('sidebar://') === 0) { return; }
+          var st = null, fail = null;
+          try {
+            var snap = rec.store.getSnapshot();
+            st = snap && snap.status;
+            fail = snap && snap.failure ? String(snap.failure).slice(0, 90) : null;
+          } catch (e) { st = 'err'; }
+          var u;
+          try {
+            var parsed = new URL(addr);
+            u = parsed.protocol + '|' + parsed.hostname + '|' + parsed.pathname.length;
+          } catch (e) { u = 'URL-threw'; }
+          out.push({
+            a: String(addr).slice(-64),
+            proto: rec.protocol === void 0 ? 'UNDEFINED' : rec.protocol,
+            st: st, h: rec.holders, u: u, f: fail
+          });
+        });
+        return out;
+      } catch (e) { return 'err'; }
+    }
+    state.diag = { counts: counts, recs: recs, settle: settle, missingServices: missingServices, loaderSvc: loaderSvc };
     function keysOf(map) {
       try { return map ? Array.from(map.keys()).slice(0, 10) : null; } catch (e) { return 'err'; }
     }
@@ -638,6 +679,8 @@ object WebPolyfill {
           rw: svc('remote.workspaceFiles'),
           rs: svc('remote.session'),
           since: state.since,
+          settle: state.settle,
+          recs: recs(),
           roster: state.roster,
           missing: state.missing,
           awaited: state.awaited,
