@@ -38,7 +38,7 @@ requestRejection(request) {
 2. 对该 URL 发 `GET`（**不要跟随重定向**，要读 `Set-Cookie`）：
    ```
    HTTP/1.1 303 See Other
-   set-cookie: dsh-auth-w3iJaA6qw3qDSBs2Itl-h4S-Y-ZeYCC-N_iZO-eI_qw=v1.eyJ2ZXJzaW9uIjoxLCJhdXRob3JpdHkiOiIxMjcuMC4wLjE6MzA4MSIsImlzc3VlZEF0IjoxNzg5MjEzMDk0NjA1LCJleHBpcmVzQXQiOjE3OTkyMTMwOTQ2MDV9.iyyZ...
+   set-cookie: dsh-auth-<base64url(sha256(authority))>=v1.<base64url(载荷)>.<签名>
    ```
    Cookie 名 = `dsh-auth-` + base64url(sha256(authority))，
    authority 就是 `127.0.0.1:3081`；载荷是签名过的 `{version,authority,issuedAt,expiresAt}`。
