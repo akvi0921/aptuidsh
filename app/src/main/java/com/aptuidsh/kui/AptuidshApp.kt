@@ -103,6 +103,15 @@ class AptuidshApp : Application() {
             "?"
         }
 
+    /** guest 有自己的 /etc，DNS 必须由宿主按当前网络写入。 */
+    private fun syncGuestResolvConf() {
+        if (!ProrootEnv.isInstalled(this)) return
+        try {
+            ProrootEnv.syncResolvConf(this)
+        } catch (t: Throwable) {
+            Log.w(TAG, "sync resolv.conf failed: " + t)
+        }
+    }
 
     /**
      * 自动引导：环境已装好就拉起后端；**未装则直接开始安装**。
