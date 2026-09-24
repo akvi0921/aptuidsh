@@ -322,3 +322,80 @@ if (!ok) { …写内容… }      // createNewFile() 成功 = 建了个【空文
 
 装 1.2.1 后打开 APP：首屏会直接显示「内置环境需要更新」+「已装 … → 内置 …」，
 点一次「更新环境」即可（约 10~30 秒解压，随后自动拉起后端）。
+
+---
+
+## 九、追加修复（1.2.2）：镜像解压失败 `zcat: not gzip`
+
+### 9.1 现象（1.2.1 装到手机上）
+
+```
+镜像释放完成：116MB 已落盘
+执行解压: /system/bin/tar -xzf .../files/rootfs.img
+tar 退出码=0，输出：zcat: not gzip          ← 关键
+rootfs 校验失败：缺少 bin/sh
+环境安装失败 java.io.IOException: rootfs 不完整，缺少 bin/sh
+```
+
+### 9.2 根因：脚本一直在产出 xz，而 App 只能解 gzip
+
+`tools/build-rootfs.sh` 的打包行**从第一天起就是 `-cJf`（xz）**：
+
+```bash
+( cd rootfs && tar --hard-dereference --numeric-owner -cJf "$WORK/dist/rootfs.img" . )
+```
+
+而 App 侧是 `/system/bin/tar -xzf`（gzip），**Android 的 toybox 没有内置 xz**
+（它会去 exec 外部 `xz`，而系统里没有 `/system/bin/xz`）。
+
+**为什么"以前是好的"**：v1.1.0 确实修过这个问题（见
+`docs/真机故障-解压失败根因.md`），但当时**只手工把那份镜像文件换成了 gzip，
+没有改脚本**。于是 `rootfs.img` 这个名字下装着 gzip —— 能跑；
+而**每次用脚本重建，又产出 xz**，装到手机上必然失败。
+本次升级重建镜像，正好踩中这个埋了很久的雷。
+
+> 这也解释了体积对不上：旧镜像 136MB（gzip），我用脚本重建出来是 117MB（xz）。
+
+### 9.3 修法
+
+1. **打包改用 gzip**：`-czf`（toybox 内置实现，零外部依赖）。
+2. **脚本自检魔数**：打包后立刻检查 `rootfs.img` 头两字节是不是 `1f8b`，
+   不是就当场报错并提示"确认用的是 -czf 而不是 -cJf" —— 不允许这个雷再埋第三次。
+   脚本里同时写明了完整踩坑说明（见 `tools/build-rootfs.sh` 7/7 段）。
+3. 复用已装好 dsh 0.1.7-rc.1 的 rootfs 目录**只重打包**，不必重跑 30 分钟的 npm 安装。
+
+### 9.4 验收（这一次按 v1.1.0 的教训做：**在与目标一致的环境里验**）
+
+先确认目标环境确实没有 xz，再从 **APK 里取出 asset** 用干净 PATH 解压：
+
+```
+$ env -i PATH=/system/bin:/system/xbin sh -c 'command -v xz || echo 无 xz'
+  无 xz ✅（与手机一致）
+
+$ unzip -o app-debug.apk assets/rootfs.img -d /tmp/w
+  → 203217210 字节
+$ env -i PATH=/system/bin:/system/xbin /system/bin/tar -xzf /tmp/w/assets/rootfs.img -C /tmp/v
+  退出码=0
+  文件数 32700    bin/sh ✅  node ✅  dsh ✅
+  镜像标记 dsh=0.1.7-rc.1    占用 794M    耗时 24s
+```
+
+**注意**：v1.1.0 的文档已经写过这条教训 —— 第一轮验证在 Termux 里跑 `toybox tar -xJf`
+通过，是因为 **Termux 的 PATH 里恰好有 xz**，验证被环境污染、结论是假的。
+所以本轮一律用 `env -i PATH=/system/bin:/system/xbin` 复现手机的干净环境。
+
+### 9.5 体积代价（必须知情的取舍）
+
+| | 之前（v1.1.6） | 本次（1.2.2） |
+|---|---|---|
+| 镜像压缩格式 | gzip | gzip（脚本修正后一致） |
+| 镜像 | 136,645,275 B | **203,217,210 B** |
+| 解压后 | 约 585 MB | 约 **794 MB** |
+| APK | 145,771,363 B | **211,866,373 B** |
+
+涨的两块原因分开看：① dsh 0.1.5→0.1.7 依赖变多（node_modules 506MB，其中 dsh 本体 488MB）；
+② gzip 比 xz 大约 1.7 倍（xz 时镜像只有 117MB）。
+
+**后续可选的优化**（本次没做）：若要压回 ~130MB，可在 App 内用纯 Java 的 xz 解码器
+（如 `org.tukaani:xz`，约 150KB、无依赖）把 asset 解成未压缩 .tar，再交给 toybox `tar -xf`
+—— toybox 解**未压缩** tar 是没问题的。代价是安装峰值占用变成约 1.6GB（暂存 tar + 解压结果）。
