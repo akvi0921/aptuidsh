@@ -197,3 +197,61 @@ Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {   // ← 只有 fill
 - dex 核对：新控制台的关键串（「环境事实核查（启动器…」「跳到最新」「只看 dsh」「显示全部」
   「复制崩溃报告」「自检结果（点开查看）」）均在包内；
 - 布局自证：外层 `fillMaxSize` + 日志区 `weight(1f)`（见 §6.1 的反例）。
+
+---
+
+## 七、追加修复（1.3.2）：设置项菜单消失了 + 横屏要保留左右布局
+
+### 7.1 根因一：`[class*=...]` 子串匹配把菜单项裁掉了
+
+上一版覆盖层用的是子串匹配：
+
+```css
+[class*="VOzbGW_nav"] { flex-direction: row !important; width: 100% !important; /* … */ }
+```
+
+`class*=` 是**子串**匹配，所以这条同时命中了 `VOzbGW_navTitle`、`VOzbGW_navList`、
+`VOzbGW_navCell` —— 于是 `width:100%` 被套到了标题上：
+
+```
+[VOzbGW_navTitle  width:100%, flex:none] [VOzbGW_navList …]   ← 总宽 200%
+   ↑ 标题独占整行，后面的四个菜单项被挤出行外，再被 nav 的 overflow:hidden 裁掉
+```
+
+表现就是用户看到的：**只剩「设置」两个字，通用设置 / 模型 / 内置插件 / Agent 预设 四个菜单项全不见了**。
+
+**修法**：改用 `[class~="X"]`（按空白分隔的 **token 精确匹配**）。
+`class~="VOzbGW_nav"` 不会命中 `VOzbGW_navTitle`，因为它是一个不同的完整类名。
+门禁新增两条：① 覆盖层里**禁止出现 `class*=`**；② `navTitle` 上**不得出现 `width:100%`**；
+并加了一条**自证**——统计 `class*= "VOzbGW_nav"` 会误伤几个类名（当前 3 个），
+证明这条护栏不是空的。
+
+### 7.2 根因二：覆盖层写成了无条件生效
+
+上一版整段覆盖没有媒体查询，横屏时也把官方布局掰成上下 —— 而横屏视口够宽，左右布局本来更好用。
+
+**修法**：整段包进
+
+```css
+@media (orientation: portrait) and (max-width: 600px) { … }
+```
+
+- **手机竖屏** → 上下布局（导航在上、内容在下，设置行也上下）；
+- **横屏 / 宽屏** → 完整保留官方原本的左右布局，一个字节都不动。
+
+`LAYOUT_CHECK` 自检同步区分：不在竖屏时写 `n/a-landscape`（而非误报 `stale`）。
+
+### 7.3 验收
+
+- `aapt2 dump badging` → `versionCode 20 / versionName 1.3.2`；
+- dex 核对：`class~="VOzbGW_panel"` / `class~="VOzbGW_navTitle"` / `orientation: portrait` /
+  `n/a-landscape` 均在包内；旧的 `class*="VOzbGW_nav"` 已清除；
+- 垫片门禁 `bash tools/polyfill-test/run.sh` → **105 / 0**（D 组新增 token 匹配、竖屏限定、
+  navTitle 宽度、自证共 5 条）。
+
+### 7.4 教训（又踩了一次「断言被自己的注释绊倒」）
+
+加护栏时我把反例写进了 CSS 注释（`…不能用 [class*="X"]…`），结果
+`!CSS.includes('class*=')` 立刻报 FAIL —— 断言命中的是我自己的说明文字。
+**凡是「不许出现 X」的断言，必须先剥掉注释再匹配**（项目经验里早有这条，这是第二次踩）。
+现在 D 组所有断言一律基于 `CSS_CODE = CSS.replace(/\/\*[\s\S]*?\*\//g, '')`。
