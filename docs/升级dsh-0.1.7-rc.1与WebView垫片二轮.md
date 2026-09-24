@@ -250,3 +250,75 @@ subagent.list   →   EXCEPTION java.lang.IllegalStateException: HTTP 404 非 JS
 | `tools/jvmtest/Harness.java` | 新增 C 段：`adaptResult` 形状还原 5 条断言 |
 | `app/build.gradle` | versionCode 15 / versionName 1.2.0 |
 | `README.md` | 同步版本、体积、协议表、工具章节 |
+
+---
+
+## 八、追加修复（1.2.1）：升级后环境**根本没被换掉**
+
+### 8.1 现象
+
+1.2.0 交付后用户反馈「你真的升级了吗」——截图里首屏仍显示
+`proroot · Ubuntu · dsh 0.1.5-rc.1`。**镜像确实是新的，但设备上跑的还是旧环境。**
+
+### 8.2 根因（`ProrootEnv.isInstalled` 只看「有没有」，不看「是不是这一份」）
+
+覆盖安装 APK 时，Android 只替换 APK，**不会碰 `filesDir` 里已解压的那份 rootfs**。
+而原先的判定是：
+
+```java
+public static boolean isInstalled(Context ctx) {
+    if (!installMarker(ctx).exists()) return false;
+    File root = rootfsDir(ctx);
+    return new File(root, "bin/sh").exists() && …node… && …dsh…;   // 只看存在性
+}
+```
+
+于是进程重启后 `isInstalled()` 依旧为 true → `RootfsInstaller.install()` 第 64 行
+`if (ProrootEnv.isInstalled(ctx)) { "环境已安装，跳过"; return; }` 直接返回 →
+**新镜像永远不会被解压**，界面上的版本号自然一直是旧的。
+
+雪上加霜的是安装标记的写法：
+
+```java
+boolean ok = marker.createNewFile();
+if (!ok) { …写内容… }      // createNewFile() 成功 = 建了个【空文件】，压根不写版本
+```
+
+——标记里连「装的是哪一份镜像」都没记，事后也无从判断。
+
+### 8.3 修法：给镜像做指纹，装的时候记下来，每次比对
+
+1. **指纹**（不解压就能算）：读 APK zip 中央目录里 `assets/rootfs.img` 的
+   `未压缩长度 + CRC32` → `122211356-7031cecb`。内容一变指纹就变。
+2. **记进安装标记**：安装完成时把 `image=<指纹>` 写进 `.aptuidsh-installed`
+   （改成总是覆盖写入，不再出现空标记）。
+3. **判定分两层**（避免把「要不要装」和「是不是这一份」混在一起）：
+   - `isPhysicallyInstalled()`：只看有没有（标记 + 关键文件）；
+   - `isInstalled()`：物理已装 **且** 指纹与当前 APK 一致；
+   - `needsImageUpdate()`：物理已装 **但** 指纹不一致 → 界面显示「需更新」。
+   老版本装的环境没有指纹行 → 判为需更新（正是升级路径）；
+   指纹算不出来（返回 null）时**宽松放行**，绝不误删用户的好环境。
+4. **顺手修掉一个安全隐患**：`DshBackend.installInner()` 现在会在重装前先
+   `stop()` 掉在跑的旧后端 —— 因为 `RootfsInstaller` 会 `deleteRecursively(rootfs)`，
+   而旧 dsh 进程正从那些文件里跑着。原先只有「重装环境」按钮里有 stop，
+   而自动升级路径（用户点「更新环境」）会绕过它。
+5. **让用户看得见**：
+   - 首屏卡片新增一行 `镜像版本  已装 0.1.5-rc.1 → 内置 0.1.7-rc.1`；
+   - 状态文案「内置环境需要更新（APK 内置镜像已换新）」；
+   - 环境占用显示「已安装（需更新）」；按钮变成明确的「更新环境」。
+6. **版本号不再写死**：`AptuidshApp.readDshVersion()` 原先的兜底是字面量 `"0.1.5+"`，
+   升级后照样显示旧版本 —— 现在改为「已装镜像版本 ?: APK 内置版本 ?: 未知」。
+   构建脚本同时产出 `dist/image-version.txt`，随包作为
+   `assets/image-version.txt` 携带内置版本（镜像是 xz 压缩的，不解压读不到里面）。
+
+### 8.4 验收
+
+- `aapt2 dump badging` → `versionCode 16 / versionName 1.2.1`；
+- APK 内含 `assets/image-version.txt`（`0.1.7-rc.1`）；
+- 逐个 dex 核对（9 个 dex）：`needsImageUpdate` / `bundledImageFingerprint` /
+  `installedDshVersion` / `bundledDshVersion` / 「已安装（需更新）」/「更新环境」全部在包内。
+
+### 8.5 对已装旧版用户的直接操作
+
+装 1.2.1 后打开 APP：首屏会直接显示「内置环境需要更新」+「已装 … → 内置 …」，
+点一次「更新环境」即可（约 10~30 秒解压，随后自动拉起后端）。
