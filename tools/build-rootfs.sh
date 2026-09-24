@@ -103,6 +103,26 @@ EOF
 chmod +x pr.sh
 mkdir -p tmp
 
+# ------------------------------------------------- 5/7 之前：DNS 必须先就位
+# 【踩坑·2026-09-24 实测】Ubuntu base 自带的 /etc/resolv.conf 是【0 字节空文件】，
+# 而 proroot 的 guest 是直接沿用宿主网络的 —— 没有 DNS 解析，
+# 第 5 步的 `npm install -g` 必然失败：
+#   npm error code EAI_AGAIN … getaddrinfo EAI_AGAIN registry.npmmirror.com
+#   /bin/sh: dsh: not found → [proroot] child exited with code 127
+# 因此 DNS 兜底【必须在 npm install 之前】写进去（脚本原先只在最后的 6/7 步写，
+# 对空 resolv.conf 的 base 镜像等于没写）。第 6/7 步还会再写一次，幂等。
+info "写入 guest 的 DNS 兜底（npm install 之前必须完成）"
+mkdir -p rootfs/etc
+{
+  # 优先采用宿主当前生效的 DNS（部分 ROM 能通过 getprop 读到）
+  getprop 2>/dev/null | sed -n 's/.*\[net\.dns[0-9]*\]: \[\(.*\)\]/nameserver \1/p' | sort -u
+  # 兜底：国内公共 DNS（本机实测 223.5.5.5 可正常解析 registry.npmmirror.com）
+  echo "nameserver 223.5.5.5"
+  echo "nameserver 114.114.114.114"
+  echo "options timeout:2 attempts:3"
+} > rootfs/etc/resolv.conf
+ok "DNS 已写入：$(tr '\n' ' ' < rootfs/etc/resolv.conf)"
+
 # ------------------------------------------------------------------- 5/7 dsh
 info "5/7 在 guest 内全局安装 @deepseek-ai/dsh@${DSH_VERSION}（需数分钟）"
 ./pr.sh "export HOME=/root
