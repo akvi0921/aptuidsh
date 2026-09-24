@@ -126,13 +126,117 @@ public final class ProrootEnv {
         return new File(ctx.getFilesDir(), INSTALL_MARKER);
     }
 
-    /** 镜像是否已解压安装。 */
-    public static boolean isInstalled(Context ctx) {
+    /**
+     * 当前 APK 里**内置镜像**的指纹（不解压就能算出来）。
+     *
+     * <p>取 APK zip 表里 {@code assets/rootfs.img} 的「未压缩长度 + CRC32」——
+     * 这两项都在 zip 中央目录里，读一次即可，**不需要解压那 117MB**。
+     * 镜像内容一变指纹就变，因此可以用来判断「设备上已解压的环境是不是当前 APK 这一份」。
+     *
+     * @return 形如 {@code 122211356-7031cecb}；取不到返回 null（调用方按「无法判断」宽松处理）
+     */
+    public static String bundledImageFingerprint(Context ctx) {
+        String cached = cachedFingerprint;
+        if (cached != null) return cached.isEmpty() ? null : cached;
+        String fp = null;
+        try {
+            String apk = ctx.getApplicationInfo().sourceDir;
+            try (java.util.zip.ZipFile zip = new java.util.zip.ZipFile(apk)) {
+                java.util.zip.ZipEntry e = zip.getEntry("assets/" + ROOTFS_ASSET);
+                if (e != null && e.getSize() > 0) {
+                    fp = e.getSize() + "-" + Long.toHexString(e.getCrc());
+                }
+            }
+        } catch (Throwable t) {
+            EnvLog.w("读取 APK 内镜像指纹失败（将退回长度判断）: " + t);
+        }
+        if (fp == null) {
+            // 后备：拿得到长度也比完全没有判断强（CRC 拿不到）
+            try (android.content.res.AssetFileDescriptor fd =
+                         ctx.getAssets().openFd(ROOTFS_ASSET)) {
+                if (fd != null && fd.getLength() > 0) fp = fd.getLength() + "-len";
+            } catch (Throwable ignored) {
+            }
+        }
+        // 空串表示「已经算过但是拿不到」，避免每次状态轮询都重试
+        cachedFingerprint = fp == null ? "" : fp;
+        return fp;
+    }
+
+    private static volatile String cachedFingerprint = null;
+
+    /** 设备上已解压环境的指纹（安装时写进安装标记）；老版本安装的标记没有这段 → 返回 null。 */
+    public static String installedImageFingerprint(Context ctx) {
+        File m = installMarker(ctx);
+        if (!m.exists()) return null;
+        try {
+            byte[] buf = new byte[(int) Math.min(m.length(), 4096)];
+            try (java.io.FileInputStream in = new java.io.FileInputStream(m)) {
+                int n = in.read(buf);
+                if (n <= 0) return null;
+                for (String line : new String(buf, 0, n, StandardCharsets.UTF_8).split("\n")) {
+                    String s = line.trim();
+                    if (s.startsWith(FINGERPRINT_PREFIX)) {
+                        return s.substring(FINGERPRINT_PREFIX.length()).trim();
+                    }
+                }
+            }
+        } catch (IOException e) {
+            EnvLog.w("读取安装标记失败: " + e);
+        }
+        return null;
+    }
+
+    /** 安装标记里指纹那一行的前缀。 */
+    public static final String FINGERPRINT_PREFIX = "image=";
+
+    /**
+     * 设备上「物理上装了一份环境」——只看标记与关键文件在不在，**不看指纹**。
+     *
+     * <p>与 {@link #isInstalled} 的分工：本方法回答「有没有」，{@code isInstalled} 回答
+     * 「有、而且是当前 APK 这一份」。升级场景下两者会分叉（有，但是旧的），
+     * 界面要能把这个中间态讲清楚。
+     */
+    public static boolean isPhysicallyInstalled(Context ctx) {
         if (!installMarker(ctx).exists()) return false;
         File root = rootfsDir(ctx);
         return new File(root, "bin/sh").exists()
                 && new File(root, "usr/local/bin/node").exists()
                 && new File(root, "usr/local/bin/dsh").exists();
+    }
+
+    /**
+     * 设备上已安装的环境是否**落后于当前 APK 内置的镜像**（即需要重装环境）。
+     *
+     * <p>为什么必须有这个判断：覆盖安装 APK 时，Android 只替换 APK，不会碰
+     * {@code filesDir} 里已解压的那份 rootfs。原先的 {@code isInstalled} 只看
+     * 「标记文件在不在 + 几个关键文件在不在」，于是**升级内置 dsh 后环境永远不更新**，
+     * 界面上一直显示旧版本（实测踩到：APK 已内置 0.1.7-rc.1，界面仍显示 0.1.5-rc.1）。
+     *
+     * <p>宽松策略：算不出当前指纹时不下「需要更新」的结论，避免误删好环境；
+     * 老版本装的环境没有指纹行 → 视为需要更新（这正是升级路径）。
+     */
+    public static boolean needsImageUpdate(Context ctx) {
+        if (!isPhysicallyInstalled(ctx)) return false;    // 没装就是「要装」，不是「要更新」
+        String bundled = bundledImageFingerprint(ctx);
+        if (bundled == null) return false;                // 判断不了就别乱动
+        String installed = installedImageFingerprint(ctx);
+        return !bundled.equals(installed);
+    }
+
+    /**
+     * 镜像是否已解压安装，且**是当前 APK 内置的那一份**。
+     *
+     * <p>加入指纹比对之后，覆盖安装新 APK 会自然走到「未安装 → 重新解压」的老路径上，
+     * 无需用户手动点「重装环境」。
+     */
+    public static boolean isInstalled(Context ctx) {
+        if (!isPhysicallyInstalled(ctx)) return false;
+        String bundled = bundledImageFingerprint(ctx);
+        if (bundled == null) return true;                 // 判断不了就沿用老口径，别误删
+        String installed = installedImageFingerprint(ctx);
+        if (installed == null) return false;              // 老标记没有指纹 → 需要重装一次
+        return bundled.equals(installed);
     }
 
     // ------------------------------------------------------------------ DNS

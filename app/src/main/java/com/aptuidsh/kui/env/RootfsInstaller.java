@@ -136,13 +136,21 @@ public final class RootfsInstaller {
 
         ProrootEnv.syncResolvConf(ctx);
 
-        try {
-            boolean ok = marker.createNewFile();
-            if (!ok) {
-                try (FileOutputStream fos = new FileOutputStream(marker, false)) {
-                    fos.write("aptuidsh\n".getBytes(StandardCharsets.UTF_8));
-                }
+        // 安装标记里必须写进【本份镜像的指纹】：
+        // 覆盖安装 APK 时 Android 不会碰 filesDir 里已解压的 rootfs，
+        // 只有靠指纹比对（见 ProrootEnv.isInstalled）才知道设备上这份是不是当前 APK 内置的那份。
+        // 注意原先的写法是「createNewFile() 成功就不写内容」→ 标记是个空文件、没有指纹，
+        // 导致升级内置 dsh 后环境永远不更新。这里统一改成总是覆盖写入。
+        try (FileOutputStream fos = new FileOutputStream(marker, false)) {
+            String fp = ProrootEnv.bundledImageFingerprint(ctx);
+            StringBuilder sb = new StringBuilder("aptuidsh\n");
+            if (fp != null) {
+                sb.append(ProrootEnv.FINGERPRINT_PREFIX).append(fp).append('\n');
+            } else {
+                EnvLog.w("算不出内置镜像指纹，安装标记将不含 image= 行（下次启动会再重装一次）");
             }
+            sb.append("installedAt=").append(System.currentTimeMillis()).append('\n');
+            fos.write(sb.toString().getBytes(StandardCharsets.UTF_8));
         } catch (IOException e) {
             throw new IOException("无法写入安装标记: " + e.getMessage(), e);
         }
