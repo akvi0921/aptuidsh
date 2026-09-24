@@ -18,8 +18,8 @@ android {
         applicationId "com.aptuidsh.kui"
         minSdk 24
         targetSdk 34
-        versionCode 20
-        versionName "1.3.2"
+        versionCode 21
+        versionName "1.3.3"
 
         // proroot 只提供 arm64-v8a 运行时
         ndk {

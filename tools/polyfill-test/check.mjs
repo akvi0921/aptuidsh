@@ -212,6 +212,20 @@ console.log('\n---------- D. 窄屏布局覆盖层（官方设置页 左右→�
   ok('导航标题没有被套上 width:100%（防止把菜单项挤出去）',
     !/\[class~="VOzbGW_navTitle"\][^}]*width:\s*100%/.test(CSS));
 
+  // 内容超出弹窗时必须能【内部滚动】，这三条缺一不可
+  ok('弹窗高度钉在可见视口内（用 dvh，而非仅 vh）',
+    /\[class~="VOzbGW_panel"\][^}]*max-height:\s*calc\(100dvh/.test(CSS_CODE));
+  ok('内容列显式 min-height:0（flex 内部滚动的前提；默认 auto 会撑破弹窗）',
+    /\[class~="VOzbGW_content"\][^}]*min-height:\s*0\s*!important/.test(CSS_CODE));
+  ok('设置内容区自身可纵向滚动',
+    /\[class~="VOzbGW_options"\][^}]*overflow-y:\s*auto\s*!important/.test(CSS_CODE));
+  // 自证：min-height:0 是必要条件 —— 若去掉它，min-height 回到 auto(=内容高度)，
+  // 内容列就不再收缩，options 拿不到滚动空间（这正是「超出看不到又不滚」的成因）
+  {
+    const contentRule = (CSS_CODE.match(/\[class~="VOzbGW_content"\]\s*\{[^}]*\}/) || [''])[0];
+    ok('自证：内容列规则里确实带上了 min-height:0', contentRule.includes('min-height'));
+  }
+
   // 自证：证明「子串匹配」真的会误伤 —— 否则上面那条护栏是空的。
   // 用 class*= 时 "VOzbGW_nav" 会连 navTitle/navList/navCell 一起命中，
   // 于是 width:100% 被套到标题上、把菜单项挤出可视区（这就是「设置项不见了」的成因）。

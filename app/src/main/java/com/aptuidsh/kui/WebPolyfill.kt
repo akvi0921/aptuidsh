@@ -171,9 +171,30 @@ object WebPolyfill {
  * ===================================================================== */
 @media (orientation: portrait) and (max-width: 600px) {
 
-  /* 弹窗本体：横向 flex → 纵向（导航在上、内容在下） */
+  /* 弹窗本体：横向 flex → 纵向（导航在上、内容在下）
+     —— 同时把高度钉死在【可见视口】内，否则内容会撑破弹窗被裁掉：
+        · dvh 跟的是可见视口，而原来的 100vh 跟的是布局视口（WebView 里两者可能不等）；
+        · 先写 vh 再写 dvh，不支持 dvh 的内核会自动丢掉后者、沿用前者。 */
   [class~="VOzbGW_panel"] {
     flex-direction: column !important;
+    height: min(800px, calc(100vh - 24px)) !important;
+    max-height: calc(100vh - 24px) !important;
+    height: min(800px, calc(100dvh - 24px)) !important;
+    max-height: calc(100dvh - 24px) !important;
+  }
+
+  /* ★ 让内容区能【内部滚动】的关键一步：
+     flex 子项的 min-height 默认是 auto（= 内容高度），拒绝收缩 → 它会撑破弹窗、
+     然后被 overflow:hidden 裁掉，表现就是「超出部分看不到、又不滚」。
+     必须显式 min-height:0 才允许它收缩，里面的 options 才拿得到滚动空间。 */
+  [class~="VOzbGW_content"] {
+    min-height: 0 !important;
+    overflow: hidden !important;
+  }
+  [class~="VOzbGW_options"] {
+    min-height: 0 !important;
+    overflow-y: auto !important;
+    -webkit-overflow-scrolling: touch !important;
   }
 
   /* 顶部导航条：原本是固定 188px 的竖列，改成占满整宽的一行 */
