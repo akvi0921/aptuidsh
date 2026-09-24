@@ -67,6 +67,8 @@ public class Harness {
         muxEvents();
         muxFollow(sid);
 
+        adaptChecks(sid);
+
         System.out.println("\n========== 结果 ==========");
         System.out.println("通过 " + pass + " / 失败 " + fail);
         if (fail > 0) System.exit(1);
@@ -192,6 +194,67 @@ public class Harness {
     }
 
     // ---------------- 工具 ----------------
+
+    // ---------------- 结果形状还原（adaptResult） ----------------
+
+    /**
+     * 钉住 {@link ApiCompat#adaptResult} 的「新形状 → 旧形状」还原。
+     *
+     * <p>为什么必须有这一段：0.1.7-rc.1 把旧的 {@code subagents/list} 删掉了，
+     * 子代理清单改由 {@code session/list} 的 {@code projections.values.subagentCatalog}
+     * 提供；适配层要把新形状还原回 {@code {entries,parentAvailable}}。
+     * 只测「请求被服务端接受」是不够的 —— 还原错了同样会让界面拿到空数据。
+     */
+    static void adaptChecks(String sid) {
+        System.out.println("\n========== C. ApiCompat.adaptResult 形状还原 ==========");
+        try {
+            JSONObject req = one("parentSessionId", sid);
+            JSONObject payload = ApiCompat.buildArgs("subagent.list", req);
+            JSONObject resp = post(ApiCompat.mapMethod("subagent.list"), payload);
+            JSONObject result = resp.optJSONObject("result");
+            JSONObject value = result == null ? null : result.optJSONObject("value");
+            if (value == null) {
+                fail++;
+                System.out.println("  FAIL  取不到 session/list 的 value，无法继续");
+                return;
+            }
+
+            JSONObject adapted = ApiCompat.adaptResult("subagent.list", req, value);
+            expect("真实父会话：parentAvailable=true", adapted.optBoolean("parentAvailable", false));
+            expect("真实父会话：entries 是数组", adapted.optJSONArray("entries") != null);
+
+            // 用不存在的父会话反证「真的按 id 过滤」，而不是恒真
+            JSONObject bogus = one("parentSessionId", "session-does-not-exist");
+            JSONObject adapted2 = ApiCompat.adaptResult("subagent.list", bogus, value);
+            expect("不存在的父会话：parentAvailable=false", !adapted2.optBoolean("parentAvailable", true));
+            JSONArray e2 = adapted2.optJSONArray("entries");
+            expect("不存在的父会话：entries 为空", e2 != null && e2.length() == 0);
+
+            // 自证：把上游必需的 subagentCatalog 删掉，必须不抛异常且 entries 为空
+            JSONObject stripped = new JSONObject(value.toString());
+            JSONArray items = stripped.optJSONArray("items");
+            if (items != null) {
+                for (int i = 0; i < items.length(); i++) {
+                    JSONObject it = items.optJSONObject(i);
+                    if (it == null) continue;
+                    JSONObject proj = it.optJSONObject("projections");
+                    JSONObject values = proj == null ? null : proj.optJSONObject("values");
+                    if (values != null) values.remove("subagentCatalog");
+                }
+            }
+            JSONObject adapted3 = ApiCompat.adaptResult("subagent.list", req, stripped);
+            JSONArray e3 = adapted3.optJSONArray("entries");
+            expect("上游缺 subagentCatalog 时不抛异常且 entries 为空", e3 != null && e3.length() == 0);
+        } catch (Exception e) {
+            fail++;
+            System.out.println("  FAIL  adaptChecks 抛异常: " + e);
+        }
+    }
+
+    static void expect(String label, boolean cond) {
+        if (cond) { pass++; } else { fail++; }
+        System.out.printf("  %-50s %s%n", label, cond ? "OK" : "FAIL");
+    }
 
     static JSONObject one(String k, String v) {
         JSONObject o = new JSONObject();

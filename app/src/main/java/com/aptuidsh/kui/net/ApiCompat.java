@@ -83,10 +83,13 @@ public final class ApiCompat {
         METHOD.put("workspace.insertSessionBefore", "workspace/insertSessionBefore");
         METHOD.put("workspace.archiveSession", "workspace/archiveSession");
         METHOD.put("workspace.list", "session/list");
-        // subagent（新 API 已并入 subagents/*）
-        METHOD.put("subagent.list", "subagents/list");
+        // subagent —— 注意：dsh 0.1.7-rc.1 起旧的 subagents/list 已被【移除】，
+        // 再调它就是 HTTP 404「not found」。子代理清单改由 session/list 的
+        // projections.values.subagentCatalog 提供（官方 Web UI 也是这么取的），
+        // 因此这里改走 session/list，再由 adaptResult 还原成旧形状。
+        METHOD.put("subagent.list", "session/list");
         METHOD.put("subagent.prompt", "subagents/prompt");
-        METHOD.put("subagent.history", "subagents/list");
+        METHOD.put("subagent.history", "session/list");
         METHOD.put("subagent.interrupt", "subagents/interruptByParent");
         // goal（单数 → 复数）
         METHOD.put("goal.get", "goals/get");
@@ -375,9 +378,9 @@ public final class ApiCompat {
                 case "subagent.list":
                 case "subagents/list":
                 case "subagent.history": {
-                    // 描述符: subagents/list(parentSessionId: SessionId) —— 扁平键，不包 request
-                    args.put("parentSessionId",
-                            p.optString("parentSessionId", p.optString("sessionId", "")));
+                    // 0.1.7-rc.1 起没有 subagents/list 了，改打 session/list；
+                    // 它只要一个可空的 _request，parentSessionId 只在结果侧用来定位父会话。
+                    args.put("_request", new JSONObject());
                     break;
                 }
 
@@ -485,6 +488,18 @@ public final class ApiCompat {
      * @param value   新版 {@code result.value}
      */
     public static JSONObject adaptResult(String oldPath, JSONObject value) {
+        return adaptResult(oldPath, null, value);
+    }
+
+    /**
+     * 带请求上下文的版本：少数新方法要靠**原始请求参数**才能还原旧形状
+     * （例如 subagent.list 现在借用 session/list，需要 parentSessionId 定位父会话）。
+     *
+     * @param oldPath 旧方法名
+     * @param request 旧版平铺请求载荷（可能为 null）
+     * @param value   新版 {@code result.value}
+     */
+    public static JSONObject adaptResult(String oldPath, JSONObject request, JSONObject value) {
         if (value == null) return null;
         try {
             switch (oldPath) {
@@ -503,6 +518,49 @@ public final class ApiCompat {
                     }
                     out.put("events", events);
                     out.put("hasMore", value.optBoolean("hasMore", false));
+                    return out;
+                }
+                case "subagent.list":
+                case "subagents/list":
+                case "subagent.history": {
+                    // 新形状（session/list）：{items:[{sessionId, projections:{values:{subagentCatalog:[…]}}}]}
+                    // 旧形状（subagents/list）：{entries:[{kind:"child", id, activity, hasChildren, mode, label?}], parentAvailable}
+                    // 两者字段名不同，这里按父会话取出 catalog 再还原。
+                    String parentId = request == null ? ""
+                            : request.optString("parentSessionId", request.optString("sessionId", ""));
+                    JSONObject out = new JSONObject();
+                    JSONArray entries = new JSONArray();
+                    boolean parentAvailable = false;
+                    JSONArray items = value.optJSONArray("items");
+                    if (items != null && !parentId.isEmpty()) {
+                        for (int i = 0; i < items.length(); i++) {
+                            JSONObject it = items.optJSONObject(i);
+                            if (it == null || !parentId.equals(it.optString("sessionId", ""))) continue;
+                            parentAvailable = true;
+                            JSONObject proj = it.optJSONObject("projections");
+                            JSONObject values = proj == null ? null : proj.optJSONObject("values");
+                            JSONArray catalog = values == null ? null : values.optJSONArray("subagentCatalog");
+                            if (catalog != null) {
+                                for (int j = 0; j < catalog.length(); j++) {
+                                    JSONObject e = catalog.optJSONObject(j);
+                                    if (e == null) continue;
+                                    JSONObject entry = new JSONObject();
+                                    entry.put("kind", "child");
+                                    entry.put("id", e.optString("id", ""));
+                                    entry.put("activity", e.optString("activity", "inactive"));
+                                    // 新 catalog 不含这个字段（官方 UI 也不读），保守取 false
+                                    entry.put("hasChildren", e.optBoolean("hasChildren", false));
+                                    entry.put("mode", e.optString("mode", "one-shot"));
+                                    String label = e.optString("label", "");
+                                    if (!label.isEmpty()) entry.put("label", label);
+                                    entries.put(entry);
+                                }
+                            }
+                            break;
+                        }
+                    }
+                    out.put("entries", entries);
+                    out.put("parentAvailable", parentAvailable);
                     return out;
                 }
                 case "session.list":

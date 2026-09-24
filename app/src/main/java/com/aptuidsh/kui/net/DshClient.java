@@ -1098,7 +1098,7 @@ public class DshClient {
         }
         JSONObject value = envelope.optJSONObject("value");
         if (value != null && envelope.optBoolean("ok", false)) {
-            JSONObject adapted = ApiCompat.adaptResult(path, value);
+            JSONObject adapted = ApiCompat.adaptResult(path, payload, value);
             if (adapted != value) {
                 envelope.put("value", adapted);
             }
