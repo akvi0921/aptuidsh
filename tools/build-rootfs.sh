@@ -186,13 +186,31 @@ proroot=arm64-v8a
 EOF
 
 # ------------------------------------------------------------------- 7/7 打包
-info "7/7 打包 rootfs.img（--hard-dereference：Android 不支持硬链接）"
+# 【必须是 gzip，不能是 xz】—— 这条踩过两次，别再改回 -cJf：
+#   Android 的 toybox tar 打印的 `J xz compression` 不是内置实现，它会去 exec 外部 xz，
+#   而系统里根本没有 /system/bin/xz → `zcat: not gzip` / `tar: exec xz: No such file or directory`。
+#   更阴险的是 toybox 解压失败后**仍返回退出码 0**，只能靠产物校验兜住。
+#   详见 docs/真机故障-解压失败根因.md（v1.1.0 的根因）。
+#   ⚠ 历史坑：v1.1.0 当时只把**镜像文件**换成了 gzip、**没改本脚本**，
+#     于是后来每次用本脚本重建都又产出 xz，装到手机上必然解压失败（2026-09-24 又踩一次）。
+info "7/7 打包 rootfs.img（gzip + --hard-dereference：Android toybox 无 xz、且不支持硬链接）"
 rm -f dist/rootfs.img
-( cd rootfs && tar --hard-dereference --numeric-owner -cJf "$WORK/dist/rootfs.img" . )
+( cd rootfs && tar --hard-dereference --numeric-owner -czf "$WORK/dist/rootfs.img" . )
+
+# 自检：万一以后有人把 -czf 改回 -cJf（或 tar 行为变化），这里必须当场拦下，
+# 不能等到装到手机上才发现「解压出来是空的」。
+MAGIC="$(head -c 2 dist/rootfs.img | od -An -tx1 | tr -d ' \n')"
+if [ "$MAGIC" != "1f8b" ]; then
+  echo "[!] 打包格式自检失败：rootfs.img 的魔数是 $MAGIC，不是 gzip 的 1f8b。" >&2
+  echo "    Android 的 toybox tar 解不了 xz（会打印 zcat: not gzip 且退出码仍是 0）。" >&2
+  echo "    请确认打包用的是 -czf 而不是 -cJf。" >&2
+  exit 1
+fi
+ok "格式自检通过：rootfs.img 是 gzip（魔数 1f8b）"
 
 ok "镜像构建完成：$WORK/dist/rootfs.img（$(du -h "$WORK/dist/rootfs.img" | cut -f1)）"
 # 额外产出一个「内置 dsh 版本」标记文件：
-# 镜像是 xz 压缩的，APP 侧不解压就读不到里面的 .aptuidsh-image，
+# 镜像是压缩的，APP 侧不解压就读不到里面的 .aptuidsh-image，
 # 于是「覆盖安装新 APK 后界面还显示旧版本」这件事没法直观解释。
 # 这个小文件会作为独立 asset 打进 APK，界面可以直接显示「已装 x → 内置 y」。
 printf '%s\n' "$DSH_VERSION" > "$WORK/dist/image-version.txt"
