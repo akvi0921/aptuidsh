@@ -329,73 +329,137 @@ object WebPolyfill {
      *   (b) `tab.contentId` 不是合法地址（`protocolOf` 返回 undefined）。
      *
      * 本脚本必须在 dsh 的 loader 队列脚本**之前**执行（inject 插在 `<head>` 之后第一个），
-     * 用 setter 陷阱接住 `window.__ModuleLoader__`，从而能记录：哪些插件 bundle 真的
-     * load 了、目标插件的 `apply` 有没有跑、跑的时候有没有抛。再定期把页面上出现的
-     * `dsh-resource://` 地址与预览面板状态一起塞进 `__aptuidshErrors`，
-     * 由 WebUiActivity 的 errorPoller 转写到环境控制台日志。
+     * 用 setter 陷阱接住 `window.__ModuleLoader__`。
      *
-     * 全程 try/catch，绝不影响页面本身。
+     * **1.3.4 的教训（真机实测）**：只接一次 `load` 是**无效**的。
+     * `window.__ModuleLoader__` 自始至终是同一个对象，但 `create()` 会把队列模式的
+     * `load` **原地替换**成「活体注册模式」的 `load`，于是先前的包装被悄悄丢掉 ——
+     * 真机上 `modules` 恒为 1（只数到 client-modules 自己），`res/rem/wsf` 恒为 false，
+     * 全是假象。所以 1.3.5 改为：包住 `create()`，在它返回后**立刻**重新包 `load`，
+     * 并用 50ms 轮询兜底 20 秒。
+     *
+     * 更关键的是**不再依赖计数推断**：包装目标插件的 `apply` 时顺手把它的 cordis
+     * `ctx` 偷出来，于是可以直接读到确定性的 ground truth：
+     *   - `providers` = `ctx.resources.providers` 的 keys —— **`file` 到底有没有注册**
+     *   - `records`   = `ctx.resources.records` 的 keys —— **预览请求的真实地址**
+     *   - `rw` / `remote` / `slots` = `ctx.get(...)` —— 三个 inject 到底齐不齐
+     *
+     * 这些行由 WebUiActivity 的 errorPoller（每 2 秒）捞出来，以 `[web] ` 前缀
+     * 写进环境控制台日志。全程 try/catch，绝不影响页面本身。
      */
     private const val RESOURCE_PROBE = """
 (function () {
   try {
     var g = window;
     if (g.__aptuidshProbe) { return; }
-    var state = g.__aptuidshProbe = { modules: [], target: [] };
-    var WANT = ['dsh-client-resources', 'dsh-api-remotes', 'dsh-api-workspace-files'];
+    var state = g.__aptuidshProbe = { ids: [], target: [], resCtx: null, wsfCtx: null, loadSeen: 0 };
+    var WANT = { 'dsh-client-resources': 1, 'dsh-api-remotes': 1, 'dsh-api-workspace-files': 1 };
     function short(id) { return String(id).replace('@deepseek-ai/', ''); }
-    function wanted(id) {
-      for (var i = 0; i < WANT.length; i++) { if (String(id).indexOf(WANT[i]) >= 0) { return true; } }
-      return false;
-    }
+    function err(e) { return (e && (e.stack || e.message)) || String(e); }
+    /** 探针自己的日志通道：直接 push，绕开 ERROR_CAPTURE 的 600 字截断。 */
     function note(line) {
       try { (g.__aptuidshErrors || (g.__aptuidshErrors = [])).push('[probe] ' + line); } catch (e) { /* ignore */ }
     }
+    /**
+     * 【实验性缓解 + 取证】让「22 个命名空间一起挂载」不再一损俱损。
+     *
+     * `dsh-api-remotes.apply` 是 `for (…) disposers.push(await ctx.remote.$mount(c))`，
+     * 外面套一层 `try { … } catch { 逐个 dispose(); throw error; }` —— 也就是说
+     * **任意一个**命名空间挂载失败，其余已经装好的（含 `remote.workspaceFiles`）
+     * 会被全部回滚。而 `remote.workspaceFiles` 一旦消失，`dsh-api-workspace-files`
+     * 就不会 apply，`file` 协议的 provider 就不会注册，预览就报「文件资源服务不可用」。
+     *
+     * 这里把 `$mount` 包成「失败也返回一个空 disposer」，于是其余命名空间照常装上；
+     * 同时把失败的贡献包名记进 `target`，一举拿到根因。
+     */
+    function patchMount(ctx) {
+      try {
+        if (typeof ctx.get !== 'function') { return; }
+        var remote = ctx.get('remote');
+        if (!remote || typeof remote.$mount !== 'function' || remote.__aptuidshMountPatched) { return; }
+        var origMount = remote.$mount;
+        remote.$mount = function (contribution) {
+          var pkg = (contribution && contribution.package) || '?';
+          var p;
+          try { p = origMount.call(this, contribution); }
+          catch (e) { state.target.push('mount-threw ' + pkg + ': ' + err(e)); return Promise.resolve(function () {}); }
+          return p.then(null, function (e) {
+            state.target.push('mount-failed ' + pkg + ': ' + err(e));
+            return function () {};
+          });
+        };
+        remote.__aptuidshMountPatched = true;
+        state.target.push('mount-patched');
+      } catch (e) { /* ignore */ }
+    }
+    /** 包住目标插件的 apply，顺便把它的 cordis ctx 偷出来 —— 这是全场最关键的证据来源。 */
+    function wrapFace(id, face) {      try {
+        if (!face || typeof face.apply !== 'function' || face.__aptuidshWrapped) { return face; }
+        var origApply = face.apply;
+        face.apply = function (ctx) {
+          if (id === 'dsh-client-resources') { state.resCtx = ctx; }
+          if (id === 'dsh-api-workspace-files') { state.wsfCtx = ctx; }
+          if (id === 'dsh-api-remotes') { patchMount(ctx); }
+          var out;
+          try { out = origApply.call(this, ctx); }
+          catch (e) { state.target.push('apply-failed ' + id + ': ' + err(e)); throw e; }
+          state.target.push('apply-ok ' + id);
+          return out;
+        };
+        face.__aptuidshWrapped = true;
+      } catch (e) { /* ignore */ }
+      return face;
+    }
+    function record(registration) {
+      try {
+        state.loadSeen += 1;
+        if (!registration || typeof registration.id !== 'string') { return registration; }
+        var id = short(registration.id);
+        if (state.ids.length < 400) { state.ids.push(id); }
+        if (WANT[id] === 1 && typeof registration.factory === 'function') {
+          var factory = registration.factory;
+          return { id: registration.id, factory: function (require) {
+            var face;
+            try { face = factory(require); }
+            catch (e) { state.target.push('factory-failed ' + id + ': ' + err(e)); throw e; }
+            return wrapFace(id, face);
+          } };
+        }
+      } catch (e) { /* ignore */ }
+      return registration;
+    }
     var held;
+    /**
+     * 关键修正：`window.__ModuleLoader__` **始终是同一个对象**，队列模式的 `load`
+     * 会被 `create()` 之后装上的「活体注册模式」`load` **原地替换掉**。
+     * 所以接一次是不够的：必须在 `create()` 返回后立刻再接一次，并用轮询兜底。
+     */
+    function wrapLoad() {
+      try {
+        if (!held || typeof held.load !== 'function' || held.load.__aptuidshWrapped) { return; }
+        var orig = held.load;
+        var wrapped = function (registration) { return orig.call(this, record(registration)); };
+        wrapped.__aptuidshWrapped = true;
+        held.load = wrapped;
+      } catch (e) { /* ignore */ }
+    }
     function hook(loader) {
-      if (!loader || loader.__aptuidshHooked || typeof loader.load !== 'function') { return; }
+      if (!loader || loader.__aptuidshHooked) { return; }
       loader.__aptuidshHooked = true;
-      var origLoad = loader.load;
-      loader.load = function (registration) {
-        try {
-          if (registration && typeof registration.id === 'string') {
-            var id = short(registration.id);
-            state.modules.push(id);
-            if (wanted(id) && typeof registration.factory === 'function') {
-              var factory = registration.factory;
-              registration = {
-                id: registration.id,
-                factory: function (require) {
-                  var face;
-                  try { face = factory(require); }
-                  catch (e) {
-                    state.target.push('factory-failed ' + id + ': ' + ((e && e.message) || e));
-                    throw e;
-                  }
-                  try {
-                    if (face && typeof face.apply === 'function' && !face.__aptuidshWrapped) {
-                      var origApply = face.apply;
-                      face.apply = function (ctx) {
-                        var out;
-                        try { out = origApply.call(this, ctx); }
-                        catch (e) {
-                          state.target.push('apply-failed ' + id + ': ' + ((e && e.message) || e));
-                          throw e;
-                        }
-                        state.target.push('apply-ok ' + id);
-                        return out;
-                      };
-                      face.__aptuidshWrapped = true;
-                    }
-                  } catch (e) { /* ignore */ }
-                  return face;
-                }
-              };
-            }
-          }
-        } catch (e) { /* ignore */ }
-        return origLoad.call(this, registration);
-      };
+      held = loader;
+      try {
+        var origCreate = loader.create;
+        if (typeof origCreate === 'function') {
+          loader.create = function (options) {
+            var sys = origCreate.call(this, options);
+            wrapLoad();
+            return sys;
+          };
+        }
+      } catch (e) { /* ignore */ }
+      wrapLoad();
+      var n = 0;
+      var poll = setInterval(function () { wrapLoad(); if ((n += 1) > 400) { clearInterval(poll); } }, 50);
     }
     try {
       Object.defineProperty(g, '__ModuleLoader__', {
@@ -403,49 +467,111 @@ object WebPolyfill {
         get: function () { return held; },
         set: function (v) { held = v; try { hook(v); } catch (e) { /* ignore */ } }
       });
+      if (g.__ModuleLoader__) { hook(g.__ModuleLoader__); }
     } catch (e) { /* ignore */ }
-    try { if (Object.getOwnPropertyDescriptor(g, '__ModuleLoader__') && g.__ModuleLoader__) { hook(g.__ModuleLoader__); } } catch (e) { /* ignore */ }
 
+    var reg = function () {
+      try {
+        if (!state.resCtx) { return null; }
+        if (typeof state.resCtx.get === 'function') {
+          var v = state.resCtx.get('resources');
+          if (v) { return v; }
+        }
+        return state.resCtx.resources || null;
+      } catch (e) { return null; }
+    };
+    function keysOf(map) {
+      try { return map ? Array.from(map.keys()).slice(0, 10) : null; } catch (e) { return 'err'; }
+    }
+    function svcFrom(ctxRef, name) {
+      try {
+        var c = ctxRef();
+        if (!c) { return 'no-ctx'; }
+        if (typeof c.get !== 'function') { return 'no-get'; }
+        var v = c.get(name);
+        return v === void 0 || v === null ? null : typeof v;
+      } catch (e) { return 'err:' + err(e); }
+    }
+    function panel() {
+      try {
+        var line = document.querySelector('[data-textpreview-state]');
+        var path = document.querySelector('[data-textpreview-path]');
+        var body = document.querySelector('[data-textpreview-body]');
+        return {
+          text: line ? String(line.textContent || '').trim().slice(0, 40) : null,
+          attr: line ? line.getAttribute('data-textpreview-state') : null,
+          path: path ? String(path.textContent || '').trim().slice(0, 70) : null,
+          body: body !== null
+        };
+      } catch (e) { return null; }
+    }
     function addresses() {
       var found = [], seen = {};
       try {
         var html = String(document.body && document.body.innerHTML || '');
-        var m = html.match(/dsh-resource:\/\/[^"'\s<>\\)]{0,180}/g) || [];
+        var m = html.match(/dsh-resource:\/\/[^"'\s<>\\)]{0,160}/g) || [];
         for (var i = 0; i < m.length && found.length < 6; i++) {
-          var a = m[i];
-          if (seen[a] !== true) { seen[a] = true; found.push(a); }
+          if (seen[m[i]] !== true) { seen[m[i]] = true; found.push(m[i]); }
         }
       } catch (e) { /* ignore */ }
       return found;
     }
+    var lastSig = '';
     function dump(tag) {
       try {
+        var r = reg();
         var out = {
           tag: tag,
-          modules: state.modules.length,
-          res: state.modules.indexOf('dsh-client-resources') >= 0,
-          rem: state.modules.indexOf('dsh-api-remotes') >= 0,
-          wsf: state.modules.indexOf('dsh-api-workspace-files') >= 0,
-          target: state.target.slice(-12),
-          body: document.querySelectorAll('[data-textpreview-body]').length,
-          stateNode: document.querySelectorAll('[data-textpreview-state]').length,
-          unsupported: document.querySelectorAll('[data-textpreview-unsupported]').length,
+          loadSeen: state.loadSeen,
+          ids: state.ids.length,
+          res: state.ids.indexOf('dsh-client-resources') >= 0,
+          rem: state.ids.indexOf('dsh-api-remotes') >= 0,
+          wsf: state.ids.indexOf('dsh-api-workspace-files') >= 0,
+          target: state.target.slice(-14),
+          providers: r ? keysOf(r.providers) : 'no-registry',
+          records: r ? keysOf(r.records) : 'no-registry',
+          rw: svcFrom(function () { return state.wsfCtx || state.resCtx; }, 'remote.workspaceFiles'),
+          remote: svcFrom(function () { return state.wsfCtx || state.resCtx; }, 'remote'),
+          slots: svcFrom(function () { return state.resCtx; }, 'slots'),
+          panel: panel(),
           addr: addresses()
         };
         note(JSON.stringify(out));
-      } catch (e) { note('dump-failed ' + ((e && e.message) || e)); }
+        lastSig = JSON.stringify(out.panel);
+      } catch (e) { note('dump-failed ' + err(e)); }
+    }
+    /** 完整模块名单，按 8 个一行分块发，避免被单行长度限制吃掉。 */
+    function dumpIds() {
+      try {
+        note('module-count=' + state.loadSeen);
+        for (var i = 0; i < state.ids.length; i += 8) {
+          note('ids[' + i + '] ' + state.ids.slice(i, i + 8).join(' '));
+        }
+      } catch (e) { /* ignore */ }
     }
     function start() {
-      var n = 0;
-      dump('t0');
-      var timer = setInterval(function () {
-        n += 1;
+      var n = 0, idsSent = false;
+      function tick() {
         dump('t' + n);
-        if (n >= 8) { clearInterval(timer); }
-      }, 8000);
+        if (!idsSent && state.loadSeen > 1) { idsSent = true; dumpIds(); }
+        n += 1;
+        if (n > 12) { clearInterval(timer); }
+      }
+      dump('t0');
+      var timer = setInterval(tick, 6000);
+      /** 预览面板一变就补一枪，确保抓到「点开文件」那一刻的现场。 */
+      try {
+        var last = 0, muts = 0;
+        new MutationObserver(function () {
+          var now = Date.now();
+          if (now - last < 2000 || muts > 20) { return; }
+          var sig = JSON.stringify(panel());
+          if (sig !== lastSig) { last = now; muts += 1; dump('mut'); }
+        }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-textpreview-state'] });
+      } catch (e) { /* ignore */ }
     }
-    if (document.readyState === 'complete') { setTimeout(start, 4000); }
-    else { g.addEventListener('load', function () { setTimeout(start, 4000); }); }
+    if (document.readyState === 'complete') { setTimeout(start, 3000); }
+    else { g.addEventListener('load', function () { setTimeout(start, 3000); }); }
   } catch (e) { /* 诊断脚本绝不能影响页面 */ }
 })();
 """
