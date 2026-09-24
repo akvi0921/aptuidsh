@@ -1017,6 +1017,87 @@ object WebPolyfill {
     };
   }
 
+  // --- URL：非特殊 scheme 的 authority（Chrome 114 WebView 真机缺口）---
+  // 真机实测（Chrome/114.0.5735.196，由 RESOURCE_PROBE 计量）：
+  //   new URL('dsh-resource://file/session/sid/a.js')
+  //     .protocol === 'dsh-resource:'
+  //     .hostname === ''                            ← 规范实现应为 'file'
+  //     .pathname === '//file/session/sid/a.js'     ← 规范实现应为 '/session/sid/a.js'
+  // （pathname 恰好长出 `//file` 6 个字符；Node 同串为 hostname='file'、pathname 长 72。）
+  // 也就是这个内核**没有解析 non-special scheme 的 authority**，把 `//host` 整段当成了路径。
+  //
+  // 危害：dsh 的地址体系全靠它。
+  //   dsh-client-resources 的 protocolOf(address) 用 hostname 判断地址归哪个 provider：
+  //     parsed.hostname === ''  ->  undefined  ->  providerOf(undefined)  ->  status 恒为 'none'
+  //   于是文件预览报「文件资源服务不可用」；更糟的是 register() 里那句补救
+  //     for (const record of this.recordsOf(protocol)) this.attach(record)
+  //   也永远匹配不到它（该记录自己的 protocol 同样是 undefined），所以永远好不了。
+  //   dsh-client-ui-sidebar-right 的 pathOf(address) 用 pathname 做标签类型匹配，同样偏。
+  //
+  // 修法：先特性探测，确认内核确实不对才补；而且只补「原生 hostname 为空 + 原生 pathname
+  // 以 // 开头 + 串里确实写了 scheme://authority」这一种情形 —— 三者同时成立才可能是
+  // 被误当成路径的 authority。`http://a//b` 这种特殊 scheme 的双斜杠路径不会被误伤
+  // （它的 hostname 非空）。
+  (function () {
+    var g = typeof globalThis !== 'undefined' ? globalThis : this;
+    var U = g.URL;
+    if (typeof U !== 'function' || !U.prototype) { return; }
+    var compliant = false;
+    try { compliant = new U('dsh-probe://host/path').hostname === 'host'; } catch (e) { compliant = false; }
+    if (compliant) { return; }                    // 内核正确：一个字都不改
+    var dHost = Object.getOwnPropertyDescriptor(U.prototype, 'hostname');
+    var dPath = Object.getOwnPropertyDescriptor(U.prototype, 'pathname');
+    if (!dHost || typeof dHost.get !== 'function') { return; }
+    if (!dPath || typeof dPath.get !== 'function') { return; }
+    var nativeHost = dHost.get;
+    var nativePath = dPath.get;
+    var AUTHORITY = /^[A-Za-z][A-Za-z0-9+.\-]*:\/\/([^\/?#]*)/;
+    /** 该 URL 的 authority 是否被内核当成了路径。 */
+    function misparsed(u) {
+      try {
+        if (nativeHost.call(u) !== '') { return false; }
+        if (nativePath.call(u).slice(0, 2) !== '//') { return false; }
+        return AUTHORITY.test(String(u.href));
+      } catch (e) { return false; }
+    }
+    /** 从 href 里把 authority 抠出来，去掉 userinfo 与端口，只留主机名。 */
+    function authorityOf(href) {
+      var m = AUTHORITY.exec(String(href));
+      if (!m) { return ''; }
+      var a = m[1];
+      var at = a.lastIndexOf('@');
+      if (at >= 0) { a = a.slice(at + 1); }
+      if (a.charAt(0) === '[') {                 // IPv6 字面量
+        var br = a.indexOf(']');
+        return br < 0 ? a : a.slice(1, br);
+      }
+      var colon = a.indexOf(':');
+      if (colon >= 0) { a = a.slice(0, colon); }
+      return a.toLowerCase();
+    }
+    try {
+      Object.defineProperty(U.prototype, 'hostname', {
+        configurable: true,
+        enumerable: dHost.enumerable === true,
+        get: function () {
+          var h = nativeHost.call(this);
+          if (h !== '' || !misparsed(this)) { return h; }
+          return authorityOf(this.href);
+        }
+      });
+      Object.defineProperty(U.prototype, 'pathname', {
+        configurable: true,
+        enumerable: dPath.enumerable === true,
+        get: function () {
+          if (!misparsed(this)) { return nativePath.call(this); }
+          var p = nativePath.call(this);
+          var i = p.indexOf('/', 2);              // 跳过 '//host'
+          return i < 0 ? '/' : p.slice(i);
+        }
+      });
+    } catch (e) { /* 改不了就保持原样：垫片绝不能把页面搞挂 */ }
+  })();
+
   // --- RegExp.escape (Chrome 136) ---
   // 规则逐码点对着 Chrome 原生实现推导出来的（第一/非第一位置分别对拍），共 6 条：
   //   1) 语法字符（脱字符/美元符/反斜杠/点/星/加/问/圆括号/方括号/花括号/竖线）与 '/'

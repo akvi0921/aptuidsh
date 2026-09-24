@@ -27,4 +27,8 @@ const m=/private const val RESOURCE_PROBE = """\n([\s\S]*?)\n"""/.exec(kt);
 process.stdout.write(m ? m[1] : "");
 ' "$HERE")" node "$HERE/settle-test.mjs"
 RC2=$?
-[ "$RC1" -eq 0 ] && [ "$RC2" -eq 0 ]
+# 非特殊 scheme authority 补丁：本机 Node 的 URL 是规范实现，必须先把 URL 换成
+# 「模拟旧内核」的假体，才能验证补丁真补上了缺口（否则只是假绿）
+node "$HERE/url-authority-test.mjs"
+RC3=$?
+[ "$RC1" -eq 0 ] && [ "$RC2" -eq 0 ] && [ "$RC3" -eq 0 ]
