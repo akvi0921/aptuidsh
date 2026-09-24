@@ -150,44 +150,62 @@ object WebPolyfill {
      * 所以这里必须 `!important` 才能稳定覆盖。
      *
      * <h3>⚠ 与 dsh 版本的耦合</h3>
-     * 选择器用的是 dsh 的 CSS Module 类名（`class*=` 前缀匹配，抗哈希后缀变化）。
-     * **升级内置 dsh 后必须重新核对这几个前缀**；[LAYOUT_CHECK] 会在设置弹窗出现时
+     * 选择器用的是 dsh 的 CSS Module 类名（`[class~=...]` 按 token 精确匹配）。
+     * **升级内置 dsh 后必须重新核对这几个类名**；[LAYOUT_CHECK] 会在设置弹窗出现时
      * 把「覆盖是否真的生效」写到 `window.__aptuidshSettingsLayout`，用于排查。
+     *
+     * <p><b>只对手机竖屏生效</b>：横屏时视口够宽，官方原本的左右布局更好用，
+     * 所以整段包在 `@media (orientation: portrait) and (max-width: 600px)` 里。
      */
     private const val CSS = """
-/* ---- 设置弹窗：左右 → 上下（导航在上，内容在下）---- */
-[class*="VOzbGW_panel"] {
-  flex-direction: column !important;
-}
-[class*="VOzbGW_nav"] {
-  flex-direction: row !important;
-  width: 100% !important;
-  align-items: center !important;
-  gap: 12px !important;
-  padding: 16px 12px 8px !important;
-  overflow: hidden !important;
-}
-[class*="VOzbGW_navTitle"] {
-  flex: none !important;
-  padding: 0 4px !important;
-}
-[class*="VOzbGW_navList"] {
-  flex-direction: row !important;
-  flex: 1 1 auto !important;
-  min-width: 0 !important;
-  gap: 4px !important;
-  overflow-x: auto !important;
-  overflow-y: hidden !important;
-}
-[class*="VOzbGW_navCell"] {
-  flex: none !important;
-  height: 36px !important;
-  white-space: nowrap !important;
-}
+/* =====================================================================
+ * 官方设置弹窗：手机竖屏下由「左右布局」改成「上下布局」
+ * ---------------------------------------------------------------------
+ * ⚠ 只在【手机竖屏】生效：横屏时视口够宽，官方原本的左右布局更好用，
+ *   必须保持原样 —— 所以整段包在 orientation:portrait 里。
+ *
+ * ⚠ 选择器必须用 [class~="X"]（按 token 精确匹配），**不能用 [class*="X"]**：
+ *   class* 是子串匹配，"VOzbGW_nav" 会同时命中 VOzbGW_navTitle / VOzbGW_navList /
+ *   VOzbGW_navCell，于是 width:100% 被套到标题上、把后面四个菜单项挤出可视区并被
+ *   overflow:hidden 裁掉 —— 表现就是「设置项全不见了」（实测踩过这一刀）。
+ * ===================================================================== */
+@media (orientation: portrait) and (max-width: 600px) {
 
-/* ---- 设置行：窄屏下标题/说明在上、控件在下，避免左列被压成「一字一行」---- */
-@media (max-width: 560px) {
-  [class*="Pt1bsG_row"] {
+  /* 弹窗本体：横向 flex → 纵向（导航在上、内容在下） */
+  [class~="VOzbGW_panel"] {
+    flex-direction: column !important;
+  }
+
+  /* 顶部导航条：原本是固定 188px 的竖列，改成占满整宽的一行 */
+  [class~="VOzbGW_nav"] {
+    flex-direction: row !important;
+    width: 100% !important;
+    align-items: center !important;
+    gap: 10px !important;
+    padding: 14px 12px 6px !important;
+    overflow: hidden !important;
+  }
+  [class~="VOzbGW_navTitle"] {
+    flex: none !important;
+    padding: 0 4px !important;
+  }
+  /* 导航项横向排列，放不下就横滑（不换行、不挤压内容区） */
+  [class~="VOzbGW_navList"] {
+    flex-direction: row !important;
+    flex: 1 1 auto !important;
+    min-width: 0 !important;
+    gap: 4px !important;
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+  }
+  [class~="VOzbGW_navCell"] {
+    flex: none !important;
+    height: 34px !important;
+    white-space: nowrap !important;
+  }
+
+  /* 设置行：窄屏下标题/说明在上、控件在下，避免左列被压成「一字一行」 */
+  [class~="Pt1bsG_row"] {
     flex-direction: column !important;
     align-items: stretch !important;
     gap: 10px !important;
@@ -207,10 +225,14 @@ object WebPolyfill {
   try {
     if (typeof MutationObserver === 'undefined' || typeof document === 'undefined') { return; }
     var obs = new MutationObserver(function () {
-      var panel = document.querySelector('[class*="VOzbGW_panel"]');
+      var panel = document.querySelector('[class~="VOzbGW_panel"]');
       if (!panel) { return; }
+      // 覆盖层只在手机竖屏生效：横屏本就该保持官方的左右布局，不算失效
+      var portrait = window.matchMedia('(orientation: portrait) and (max-width: 600px)').matches;
       var dir = getComputedStyle(panel).flexDirection;
-      window.__aptuidshSettingsLayout = (dir === 'column') ? 'applied' : 'stale';
+      window.__aptuidshSettingsLayout = portrait
+        ? ((dir === 'column') ? 'applied' : 'stale')
+        : 'n/a-landscape';
       obs.disconnect();
     });
     obs.observe(document.documentElement, { childList: true, subtree: true });

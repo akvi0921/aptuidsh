@@ -183,7 +183,10 @@ console.log('\n---------- D. 窄屏布局覆盖层（官方设置页 左右→�
 {
   const CSS = extract('CSS');
   const LAYOUT_CHECK = extract('LAYOUT_CHECK');
-  console.log(`抽出覆盖样式 ${CSS.length} 字符 / 自检脚本 ${LAYOUT_CHECK.length} 字符`);
+  // 断言一律基于「剥掉注释后的 CSS」：覆盖层的注释里刻意写了反例
+  // （class* 与不带 !important 的写法），不剥注释就会把自己绊倒
+  const CSS_CODE = CSS.replace(/\/\*[\s\S]*?\*\//g, '');
+  console.log(`抽出覆盖样式 ${CSS.length} 字符（去注释后 ${CSS_CODE.length} 字符）/ 自检脚本 ${LAYOUT_CHECK.length} 字符`);
 
   ok('CSS 里没有美元符号（Kotlin 原样字符串模板起始符）', !CSS.includes('$'));
   ok('LAYOUT_CHECK 里没有美元符号', !LAYOUT_CHECK.includes('$'));
@@ -194,20 +197,47 @@ console.log('\n---------- D. 窄屏布局覆盖层（官方设置页 左右→�
 
   // 这几条是「设置页左右→上下」的关键，缺一不可
   ok('覆盖了设置弹窗面板（flex-direction: column）',
-    /\[class\*="VOzbGW_panel"\][^}]*flex-direction:\s*column\s*!important/.test(CSS));
-  ok('覆盖了左侧竖排导航（改为横向排列）',
-    /\[class\*="VOzbGW_nav"\][^}]*flex-direction:\s*row\s*!important/.test(CSS));
+    /\[class~="VOzbGW_panel"\][^}]*flex-direction:\s*column\s*!important/.test(CSS));
+  ok('覆盖了竖排导航（改为横向排列）',
+    /\[class~="VOzbGW_nav"\][^}]*flex-direction:\s*row\s*!important/.test(CSS));
   ok('覆盖了导航列表（横向 + 自身滚动）',
-    /\[class\*="VOzbGW_navList"\][^}]*flex-direction:\s*row\s*!important/.test(CSS));
+    /\[class~="VOzbGW_navList"\][^}]*flex-direction:\s*row\s*!important/.test(CSS));
   ok('覆盖了设置行（窄屏下标题在上、控件在下）',
-    /\[class\*="Pt1bsG_row"\][^}]*flex-direction:\s*column\s*!important/.test(CSS));
+    /\[class~="Pt1bsG_row"\][^}]*flex-direction:\s*column\s*!important/.test(CSS));
+
+  // ⚠ 回归护栏：绝不能退回 [class*="..."]。子串匹配会让 "VOzbGW_nav" 同时命中
+  // VOzbGW_navTitle/navList/navCell，width:100% 被套到标题上 → 四个菜单项被裁掉、
+  // 表现为「设置项全部消失」（实测踩过一次）。
+  ok('选择器按 token 精确匹配（不得出现 class*= 子串匹配）', !CSS_CODE.includes('class*='));
+  ok('导航标题没有被套上 width:100%（防止把菜单项挤出去）',
+    !/\[class~="VOzbGW_navTitle"\][^}]*width:\s*100%/.test(CSS));
+
+  // 自证：证明「子串匹配」真的会误伤 —— 否则上面那条护栏是空的。
+  // 用 class*= 时 "VOzbGW_nav" 会连 navTitle/navList/navCell 一起命中，
+  // 于是 width:100% 被套到标题上、把菜单项挤出可视区（这就是「设置项不见了」的成因）。
+  {
+    const tokens = CSS_CODE.match(/VOzbGW_[A-Za-z0-9_]+/g) || [];
+    const victims = [...new Set(tokens.filter(t => t !== 'VOzbGW_nav' && t.startsWith('VOzbGW_nav')))];
+    ok('自证：class*= 确实会误伤这些类名（护栏非空）', victims.length >= 3,
+      `只命中 ${victims.length} 个：${victims.join(',')}`);
+  }
+
+  // 横屏必须保持官方左右布局：整段覆盖必须在「竖屏」媒体查询里
+  ok('覆盖层限定在竖屏（orientation: portrait）',
+    /@media\s*\(orientation:\s*portrait\)/.test(CSS_CODE));
+  ok('且限定在手机宽度（max-width）', /max-width:\s*600px/.test(CSS_CODE));
+  {
+    const mediaIdx = CSS_CODE.indexOf('@media');
+    const panelIdx = CSS_CODE.indexOf('[class~="VOzbGW_panel"]');
+    ok('所有选择器都在竖屏媒体查询之内', mediaIdx >= 0 && mediaIdx < panelIdx);
+  }
 
   // 必须全是 !important：dsh 的插件样式是运行时 append 到 <head> 末尾的，
   // 同为单类选择器时它排在我们后面、不加 !important 覆盖不住（这条是踩坑结论）
   // 注意用 (?<![\w-]) 前缀：否则 `max-width:` 会被 `width` 误命中（自己踩过）
   const PROP = /(?<![\w-])(flex-direction|width|align-items|padding|overflow[a-z-]*|flex|min-width|gap|height|white-space)\s*:/g;
-  const layoutProps = CSS.match(PROP) || [];
-  const importantProps = CSS.match(
+  const layoutProps = CSS_CODE.match(PROP) || [];
+  const importantProps = CSS_CODE.match(
     /(?<![\w-])(flex-direction|width|align-items|padding|overflow[a-z-]*|flex|min-width|gap|height|white-space)\s*:[^;]*!important/g) || [];
   eq('布局属性全部带 !important', layoutProps.length, importantProps.length);
   ok('布局属性数量合理（>15）', layoutProps.length > 15, `实际 ${layoutProps.length}`);
