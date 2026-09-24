@@ -8,21 +8,14 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -39,7 +32,6 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.aptuidsh.kui.env.DshBackend
 import com.aptuidsh.kui.env.EnvLog
@@ -53,214 +45,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-/**
- * 内置环境控制卡：展示 proroot + rootfs + dsh 后端的实时状态，并提供安装/启停/重启入口。
- *
- * <p>APTUIDSH 与纯客户端最大的不同在于「后端是自己身上的一个 Linux 环境」，因此首屏必须
- * 让用户一眼看清：环境装没装、装多大、后端在不在跑、端口是不是 3081。
- */
 @Composable
-fun EnvControlCard(
-    onOpenConsole: () -> Unit,
-    onOpenWebUi: () -> Unit,
-) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val backend = remember { DshBackend.get() }
-
-    var status by remember { mutableStateOf(backend.status(context)) }
-
-    // 由真实阶段推导「忙碌」，而不是靠本地布尔量：
-    // 首版用本地 busy 标记，一旦工作转交外部执行就没有复位时机，按钮会永久禁用（表现为点了没反应）。
-    val busy = status.phase == DshBackend.Phase.INSTALLING
-            || status.phase == DshBackend.Phase.STARTING
-            || status.phase == DshBackend.Phase.STOPPING
-
-    // 轮询状态：安装/启动过程中会持续刷新进度
-    LaunchedEffect(Unit) {
-        while (true) {
-            status = backend.status(context)
-            delay(1200)
-        }
-    }
-    DisposableEffect(Unit) {
-        val listener = object : DshBackend.Listener {
-            override fun onStatus(s: DshBackend.Status) {
-                status = s
-            }
-
-            override fun onLogLine(line: String) = Unit
-        }
-        backend.addListener(listener)
-        onDispose { backend.removeListener(listener) }
-    }
-
-    val dotColor = when (status.phase) {
-        DshBackend.Phase.RUNNING -> SuccessGreen
-        DshBackend.Phase.ERROR -> ErrorRed
-        DshBackend.Phase.INSTALLING, DshBackend.Phase.STARTING, DshBackend.Phase.STOPPING ->
-            MaterialTheme.colorScheme.primary
-        else -> MaterialTheme.colorScheme.outline
-    }
-    // 覆盖安装新 APK 后，filesDir 里那份 rootfs 仍是旧的（Android 不会替我们更新），
-    // 靠镜像指纹比对识别（见 ProrootEnv.needsImageUpdate）。必须让用户看得见 ——
-    // 否则表现就是「明明装了新 APK，界面还显示旧 dsh 版本」，实测用户就是这样被坑的。
-    val needsImageUpdate = remember(status.installed, status.phase, status.progressPercent) {
-        runCatching { ProrootEnv.needsImageUpdate(context) }.getOrDefault(false)
-    }
-    // 「已装 x → 内置 y」：让升级前后的版本差异一眼可见（镜像是压缩的，不解压读不到里面）
-    val installedDshVersion: String? = remember(status.installed, status.phase) {
-        runCatching { ProrootEnv.installedDshVersion(context) }.getOrNull()
-    }
-    val bundledDshVersion: String? = remember {
-        runCatching { ProrootEnv.bundledDshVersion(context) }.getOrNull()
-    }
-    val statusText = when (status.phase) {
-        DshBackend.Phase.NOT_INSTALLED ->
-            if (needsImageUpdate) "内置环境需要更新（APK 内置镜像已换新）" else "内置环境未安装"
-        DshBackend.Phase.INSTALLING -> status.message.ifEmpty { "正在安装内置环境…" }
-        DshBackend.Phase.STOPPED -> when {
-            needsImageUpdate -> "环境需要更新 · 后端未运行"
-            status.installed -> "环境就绪 · 后端未运行"
-            else -> "内置环境未安装"
-        }
-        DshBackend.Phase.STARTING -> status.message.ifEmpty { "正在启动内置 dsh…" }
-        DshBackend.Phase.RUNNING -> status.message.ifEmpty { "内置 dsh 运行中" }
-        DshBackend.Phase.STOPPING -> "正在停止…"
-        DshBackend.Phase.ERROR -> status.message.ifEmpty { "启动异常" }
-    }
-
-    Card(
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(12.dp).background(dotColor, CircleShape))
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    text = "内置运行环境",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
-                Spacer(Modifier.weight(1f))
-                Text(
-                    text = "proroot · Ubuntu · dsh ${com.aptuidsh.kui.net.ApiCompat.dshVersion()}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Spacer(Modifier.height(8.dp))
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            Spacer(Modifier.height(8.dp))
-            Text(
-                text = statusText,
-                style = MaterialTheme.typography.bodyMedium,
-                color = if (status.phase == DshBackend.Phase.ERROR) {
-                    MaterialTheme.colorScheme.error
-                } else {
-                    MaterialTheme.colorScheme.onSurface
-                },
-            )
-            if (status.phase == DshBackend.Phase.INSTALLING && status.progressPercent in 0..100) {
-                Spacer(Modifier.height(8.dp))
-                LinearProgressIndicator(
-                    progress = status.progressPercent / 100f,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    text = "${status.progressPercent}%",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Spacer(Modifier.height(8.dp))
-            InfoLine("后端地址", ProrootEnv.BASE_URL, mono = true)
-            InfoLine("端口状态", if (status.portAlive) "已监听" else "未监听")
-            InfoLine(
-                "环境占用",
-                when {
-                    status.installed -> "已安装"
-                    needsImageUpdate -> "已安装（需更新）"
-                    else -> "—"
-                },
-            )
-            if (needsImageUpdate && bundledDshVersion != null) {
-                InfoLine(
-                    "镜像版本",
-                    "已装 ${installedDshVersion ?: "未知"} → 内置 $bundledDshVersion",
-                    mono = true,
-                )
-            }
-            if (status.pid > 0) {
-                InfoLine("后端 PID", status.pid.toString(), mono = true)
-            }
-
-            Spacer(Modifier.height(12.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                // 升级新 APK 后设备上那份 rootfs 还是旧的：这时 status.installed=false
-                // 但 needsImageUpdate=true。给它一个说得清的入口（内部会先停后端再重装），
-                // 而不是让用户看到一个莫名其妙的「安装并启动」。
-                if (needsImageUpdate) {
-                    Button(
-                        enabled = !busy,
-                        onClick = {
-                            DshService.requestInstallAndStart(context)
-                        },
-                    ) { Text("更新环境") }
-                    if (status.phase == DshBackend.Phase.RUNNING) {
-                        OutlinedButton(
-                            enabled = !busy,
-                            onClick = {
-                                DshService.requestStop(context)
-                            },
-                        ) { Text("停止") }
-                    }
-                } else if (!status.installed) {
-                    Button(
-                        enabled = !busy,
-                        onClick = {
-                            // 交给前台服务执行：服务有自己的 worker 线程，
-                            // 不受界面协程作用域影响，且全程写 EnvLog
-                            DshService.requestInstallAndStart(context)
-                        },
-                    ) { Text("安装并启动") }
-                } else if (status.phase == DshBackend.Phase.RUNNING) {
-                    OutlinedButton(
-                        enabled = !busy,
-                        onClick = {
-                            DshService.requestStop(context)
-                        },
-                    ) { Text("停止") }
-                    OutlinedButton(
-                        enabled = !busy,
-                        onClick = {
-                            DshService.requestRestart(context)
-                        },
-                    ) { Text("重启") }
-                } else {
-                    Button(
-                        enabled = !busy,
-                        onClick = {
-                            DshService.requestStart(context)
-                        },
-                    ) { Text("启动后端") }
-                }
-            }
-            Spacer(Modifier.height(8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = onOpenConsole) { Text("环境控制台") }
-                OutlinedButton(onClick = onOpenWebUi) { Text("官方 Web UI") }
-            }
-        }
-    }
-}
-
-@Composable
-private fun InfoLine(label: String, value: String, mono: Boolean = false) {
+internal fun InfoLine(label: String, value: String, mono: Boolean = false) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
