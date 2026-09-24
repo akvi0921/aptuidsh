@@ -6,8 +6,9 @@
 #   1. ~/android-sdk（platform-34 + build-tools 34.0.0）
 #   2. ~/gradle-8.13
 #   3. JDK 17（$PREFIX 自带）
-#   4. app/src/main/assets/rootfs.tar.xz 与 app/src/main/jniLibs/arm64-v8a/*.so
-#      已由 tools/build-rootfs.sh 生成（两者不入 Git）
+#   4. app/src/main/assets/rootfs.img（含 image-version.txt）与
+#      app/src/main/jniLibs/arm64-v8a/*.so
+#      已由 tools/build-rootfs.sh 生成（均不入 Git）
 #
 # 用法：bash tools/build-apk.sh [debug|release]
 # =============================================================================
@@ -23,9 +24,18 @@ GRADLE="$HOME/gradle-8.13/bin/gradle"
 [ -x "$GRADLE" ] || { echo "[!] 找不到 gradle: $GRADLE"; exit 1; }
 [ -d "$ANDROID_HOME" ] || { echo "[!] 找不到 Android SDK: $ANDROID_HOME"; exit 1; }
 
-if [ ! -f "$PROJ_DIR/app/src/main/assets/rootfs.tar.xz" ]; then
-  echo "[!] 缺少内置镜像 app/src/main/assets/rootfs.tar.xz"
+if [ ! -f "$PROJ_DIR/app/src/main/assets/rootfs.img" ]; then
+  echo "[!] 缺少内置镜像 app/src/main/assets/rootfs.img"
   echo "    请先运行: bash tools/build-rootfs.sh"
+  exit 1
+fi
+# 镜像必须是 gzip：Android 的 toybox tar 解不了 xz（且解压失败退出码仍是 0）
+if [ "$(head -c 2 "$PROJ_DIR/app/src/main/assets/rootfs.img" | od -An -tx1 | tr -d ' \n')" != "1f8b" ]; then
+  echo "[!] assets/rootfs.img 不是 gzip（魔数应为 1f8b）—— 手机端会报 zcat: not gzip"
+  exit 1
+fi
+if [ ! -f "$PROJ_DIR/app/src/main/assets/image-version.txt" ]; then
+  echo "[!] 缺少 assets/image-version.txt（内置 dsh 版本标记，由 build-rootfs.sh 一并产出）"
   exit 1
 fi
 if ! ls "$PROJ_DIR"/app/src/main/jniLibs/arm64-v8a/libproroot.so >/dev/null 2>&1; then
@@ -40,8 +50,10 @@ case "$VARIANT" in
   *)       TASK=":app:assembleDebug" ;;
 esac
 
-echo "==> $GRADLE $TASK --no-daemon"
-"$GRADLE" "$TASK" --no-daemon
+# 进度可见性：Gradle 的进度条只在 rich 控制台出现，而非交互环境需要 pty 包装；
+# 且**绝不能接管道/重定向**（那会让输出不再流经 stdout，进度条就采集不到）。
+echo "==> $GRADLE $TASK --console=rich"
+TERM=xterm-256color script -q -f -c "$GRADLE $TASK --console=rich" /dev/null
 
 APK="app/build/outputs/apk/$VARIANT/app-$VARIANT.apk"
 [ -f "$APK" ] || { echo "[!] 未找到产物 $APK"; exit 1; }
