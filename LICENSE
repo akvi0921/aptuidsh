@@ -19,17 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-NOTE ON THIRD-PARTY COMPONENTS
-
-This license covers APTUIDSH's own source code only. The distributed APK also
-bundles third-party components with their own licenses -- notably proroot
-(which carries a mandatory attribution clause), DeepSeek Harness (dsh),
-Node.js, and an Ubuntu base root filesystem. See:
-
-    third_party/OPEN-SOURCE.md
-    third_party/proroot-LICENSE.txt
-
-Anyone redistributing the APK must comply with those licenses as well.
