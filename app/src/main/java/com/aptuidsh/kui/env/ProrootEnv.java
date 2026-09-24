@@ -305,6 +305,41 @@ public final class ProrootEnv {
         }
     }
 
+    /** 内置 dsh 版本标记 asset（由 tools/build-rootfs.sh 一并产出）。 */
+    public static final String VERSION_ASSET = "image-version.txt";
+
+    /**
+     * 当前 APK **内置镜像里的 dsh 版本**（读 assets/image-version.txt）。
+     *
+     * <p>镜像是 xz 压缩的，不解压就读不到里面的 {@code .aptuidsh-image}，
+     * 所以构建脚本额外产出一个纯文本版本标记随包携带 —— 界面因此能直接显示
+     * 「已装 0.1.5-rc.1 → 内置 0.1.7-rc.1」，而不是让人对着一个没变过的版本号发懵。
+     *
+     * @return 形如 {@code 0.1.7-rc.1}；读不到返回 null
+     */
+    public static String bundledDshVersion(Context ctx) {
+        try (java.io.InputStream in = ctx.getAssets().open(VERSION_ASSET)) {
+            byte[] buf = new byte[256];
+            int n = in.read(buf);
+            if (n <= 0) return null;
+            String s = new String(buf, 0, n, StandardCharsets.UTF_8).trim();
+            return s.isEmpty() ? null : s;
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    /** 已安装镜像里的 dsh 版本（解析 {@code .aptuidsh-image} 的 {@code dsh=} 行）。 */
+    public static String installedDshVersion(Context ctx) {
+        String info = imageInfo(ctx);
+        if (info == null) return null;
+        for (String line : info.split("\n")) {
+            String s = line.trim();
+            if (s.startsWith("dsh=")) return s.substring(4).trim();
+        }
+        return null;
+    }
+
     // ------------------------------------------------------------------ 启动方式
 
     /**

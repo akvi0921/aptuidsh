@@ -106,16 +106,19 @@ class AptuidshApp : Application() {
             "?"
         }
 
-    /** 从 `rootfs/.aptuidsh-image` 里解析 `dsh=` 行。 */
-    private fun readDshVersion(): String {
-        val info = ProrootEnv.imageInfo(this) ?: return "0.1.5+"
-        return info.lineSequence()
-            .firstOrNull { it.startsWith("dsh=") }
-            ?.removePrefix("dsh=")
-            ?.trim()
-            ?.takeIf { it.isNotEmpty() }
-            ?: "0.1.5+"
-    }
+    /**
+     * 内置 dsh 版本：
+     *  1) 已安装 → 读设备上那份 rootfs 的 `.aptuidsh-image`（**真在跑的那份**）；
+     *  2) 还没装、或装的是被 APK 淘汰的旧镜像 → 退回 APK 内置镜像的版本标记
+     *     （`assets/image-version.txt`，由 tools/build-rootfs.sh 一并产出）。
+     *
+     * <p>注意**不要写死版本号**：这里原先的兜底是字面量 `"0.1.5+"`，升级后它照样显示旧版本，
+     * 直接造成「到底升级没有」这个疑问。
+     */
+    private fun readDshVersion(): String =
+        ProrootEnv.installedDshVersion(this)
+            ?: ProrootEnv.bundledDshVersion(this)
+            ?: "未知"
 
     /** guest 有自己的 /etc，DNS 必须由宿主按当前网络写入。 */
     private fun syncGuestResolvConf() {

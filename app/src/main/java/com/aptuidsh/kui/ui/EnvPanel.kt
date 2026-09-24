@@ -102,10 +102,28 @@ fun EnvControlCard(
             MaterialTheme.colorScheme.primary
         else -> MaterialTheme.colorScheme.outline
     }
+    // 覆盖安装新 APK 后，filesDir 里那份 rootfs 仍是旧的（Android 不会替我们更新），
+    // 靠镜像指纹比对识别（见 ProrootEnv.needsImageUpdate）。必须让用户看得见 ——
+    // 否则表现就是「明明装了新 APK，界面还显示旧 dsh 版本」，实测用户就是这样被坑的。
+    val needsImageUpdate = remember(status.installed, status.phase, status.progressPercent) {
+        runCatching { ProrootEnv.needsImageUpdate(context) }.getOrDefault(false)
+    }
+    // 「已装 x → 内置 y」：让升级前后的版本差异一眼可见（镜像是压缩的，不解压读不到里面）
+    val installedDshVersion: String? = remember(status.installed, status.phase) {
+        runCatching { ProrootEnv.installedDshVersion(context) }.getOrNull()
+    }
+    val bundledDshVersion: String? = remember {
+        runCatching { ProrootEnv.bundledDshVersion(context) }.getOrNull()
+    }
     val statusText = when (status.phase) {
-        DshBackend.Phase.NOT_INSTALLED -> "内置环境未安装"
+        DshBackend.Phase.NOT_INSTALLED ->
+            if (needsImageUpdate) "内置环境需要更新（APK 内置镜像已换新）" else "内置环境未安装"
         DshBackend.Phase.INSTALLING -> status.message.ifEmpty { "正在安装内置环境…" }
-        DshBackend.Phase.STOPPED -> if (status.installed) "环境就绪 · 后端未运行" else "内置环境未安装"
+        DshBackend.Phase.STOPPED -> when {
+            needsImageUpdate -> "环境需要更新 · 后端未运行"
+            status.installed -> "环境就绪 · 后端未运行"
+            else -> "内置环境未安装"
+        }
         DshBackend.Phase.STARTING -> status.message.ifEmpty { "正在启动内置 dsh…" }
         DshBackend.Phase.RUNNING -> status.message.ifEmpty { "内置 dsh 运行中" }
         DshBackend.Phase.STOPPING -> "正在停止…"
@@ -162,14 +180,46 @@ fun EnvControlCard(
             Spacer(Modifier.height(8.dp))
             InfoLine("后端地址", ProrootEnv.BASE_URL, mono = true)
             InfoLine("端口状态", if (status.portAlive) "已监听" else "未监听")
-            InfoLine("环境占用", if (status.installed) "已安装" else "—")
+            InfoLine(
+                "环境占用",
+                when {
+                    status.installed -> "已安装"
+                    needsImageUpdate -> "已安装（需更新）"
+                    else -> "—"
+                },
+            )
+            if (needsImageUpdate && bundledDshVersion != null) {
+                InfoLine(
+                    "镜像版本",
+                    "已装 ${installedDshVersion ?: "未知"} → 内置 $bundledDshVersion",
+                    mono = true,
+                )
+            }
             if (status.pid > 0) {
                 InfoLine("后端 PID", status.pid.toString(), mono = true)
             }
 
             Spacer(Modifier.height(12.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (!status.installed) {
+                // 升级新 APK 后设备上那份 rootfs 还是旧的：这时 status.installed=false
+                // 但 needsImageUpdate=true。给它一个说得清的入口（内部会先停后端再重装），
+                // 而不是让用户看到一个莫名其妙的「安装并启动」。
+                if (needsImageUpdate) {
+                    Button(
+                        enabled = !busy,
+                        onClick = {
+                            DshService.requestInstallAndStart(context)
+                        },
+                    ) { Text("更新环境") }
+                    if (status.phase == DshBackend.Phase.RUNNING) {
+                        OutlinedButton(
+                            enabled = !busy,
+                            onClick = {
+                                DshService.requestStop(context)
+                            },
+                        ) { Text("停止") }
+                    }
+                } else if (!status.installed) {
                     Button(
                         enabled = !busy,
                         onClick = {

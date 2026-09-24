@@ -191,5 +191,12 @@ rm -f dist/rootfs.img
 ( cd rootfs && tar --hard-dereference --numeric-owner -cJf "$WORK/dist/rootfs.img" . )
 
 ok "镜像构建完成：$WORK/dist/rootfs.img（$(du -h "$WORK/dist/rootfs.img" | cut -f1)）"
+# 额外产出一个「内置 dsh 版本」标记文件：
+# 镜像是 xz 压缩的，APP 侧不解压就读不到里面的 .aptuidsh-image，
+# 于是「覆盖安装新 APK 后界面还显示旧版本」这件事没法直观解释。
+# 这个小文件会作为独立 asset 打进 APK，界面可以直接显示「已装 x → 内置 y」。
+printf '%s\n' "$DSH_VERSION" > "$WORK/dist/image-version.txt"
+ok "内置 dsh 版本标记：$WORK/dist/image-version.txt（$DSH_VERSION）"
 ok "复制到项目：cp $WORK/dist/rootfs.img $PROJ_DIR/app/src/main/assets/rootfs.img"
+ok "             cp $WORK/dist/image-version.txt $PROJ_DIR/app/src/main/assets/image-version.txt"
 ok "同步 proroot 二进制：cp $WORK/proroot/*.so $PROJ_DIR/app/src/main/jniLibs/arm64-v8a/"

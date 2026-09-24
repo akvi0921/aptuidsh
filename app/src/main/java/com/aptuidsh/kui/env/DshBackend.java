@@ -196,6 +196,18 @@ public final class DshBackend {
             setPhase(ctx, Phase.STOPPED, "环境已就绪");
             return true;
         }
+        // 【必须】重装之前先把在跑的旧后端停掉。
+        // RootfsInstaller 会 deleteRecursively(rootfs)，而旧 dsh 进程正从那些文件里跑着；
+        // 「覆盖安装新 APK → 指纹不一致 → 自动重装」这条新路径正是最容易撞上它的场景
+        // （用户点的是「安装并启动」，不会自己去点「重装环境」，所以不能只依赖那个按钮里的 stop）。
+        if (pid > 0 || portAlive) {
+            EnvLog.i("重装前先停止在跑的旧后端（pid=" + pid + "，portAlive=" + portAlive + "）");
+            try {
+                stop(ctx);
+            } catch (Throwable t) {
+                EnvLog.w("停止旧后端失败（继续重装）: " + t);
+            }
+        }
         setPhase(ctx, Phase.INSTALLING, "正在安装内置 Linux 环境…");
         // 解压 585MB 之前先确认启动器能跑：Android 10+ 只允许 exec nativeLibraryDir 里的文件，
         // 一旦这条不成立，装完也是白装。
