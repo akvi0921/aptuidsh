@@ -79,6 +79,18 @@ ok('探针不改变任何 dsh 行为（无 mount 缓解、无 create 之外的�
 ok('探针量出服务级联时延（since 时间线）',
   PROBE.includes('state.since') && PROBE.includes("mark('remoteWorkspaceFiles'"),
   '缺少 since 时间线');
+// 真机根因：dsh 的 web boot 内核「一次性、无重试」地要求所有 entry 都是 active，
+// 而 remote.* 命名空间要等 22 个串行挂载完成才出现 —— 旧内核上这个窗口必然被撞上。
+// 1.3.7 通过 ctx.get('loader') 把 loader.await() 变成「等到名单收敛」来让检查落在窗口之后。
+ok('探针把 loader.await() 改成「等到插件名单收敛」（真机 boot 竞态的修复）',
+  PROBE.includes("ctx.get('loader')") && PROBE.includes('Promise.resolve(base).then'),
+  '找不到 loader.await 补丁');
+ok('该补丁必须有界：卡住就要放手，绝不能挂死启动',
+  PROBE.includes('Date.now() - progress > 3000') && PROBE.includes('Date.now() - t0 > 20000'),
+  '缺少「无进展 3 秒 / 总时长 20 秒」的退让条件');
+ok('该补丁记录卡住时到底缺哪些服务（便于定位真正缺失的 provider）',
+  PROBE.includes('roster-stuck') && PROBE.includes('missingServices'),
+  '缺少 roster-stuck / missingServices');
 ok('探针抓 boot 遮罩原文（dsh 的激活失败清单）',
   PROBE.includes('[data-dsh-boot]'),
   '缺少 boot 遮罩抓取');

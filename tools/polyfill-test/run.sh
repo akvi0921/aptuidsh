@@ -17,4 +17,14 @@ if ! command -v node >/dev/null 2>&1; then
   exit 1
 fi
 
-exec node "$HERE/check.mjs"
+node "$HERE/check.mjs"
+RC1=$?
+# loader.await 收敛补丁是唯一一处有意改变 dsh 行为的补丁，单独做真实计时验证
+PROBE_SRC="$(node -e '
+const fs=require("fs"),path=require("path");
+const kt=fs.readFileSync(path.join(process.argv[1],"..","..","app/src/main/java/com/aptuidsh/kui/WebPolyfill.kt"),"utf8");
+const m=/private const val RESOURCE_PROBE = """\n([\s\S]*?)\n"""/.exec(kt);
+process.stdout.write(m ? m[1] : "");
+' "$HERE")" node "$HERE/settle-test.mjs"
+RC2=$?
+[ "$RC1" -eq 0 ] && [ "$RC2" -eq 0 ]

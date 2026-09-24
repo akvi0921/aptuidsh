@@ -354,7 +354,7 @@ object WebPolyfill {
   try {
     var g = window;
     if (g.__aptuidshProbe) { return; }
-    var state = g.__aptuidshProbe = { ids: [], target: [], resCtx: null, addrs: [], t0: Date.now(), since: {} };
+    var state = g.__aptuidshProbe = { ids: [], target: [], resCtx: null, addrs: [], t0: Date.now(), since: {}, roster: null, missing: null, awaited: 0 };
     var WANT = { 'dsh-client-resources': 1, 'dsh-api-remotes': 1, 'dsh-api-workspace-files': 1 };
     function short(id) { return String(id).replace('@deepseek-ai/', ''); }
     function err(e) { return (e && (e.stack || e.message)) || String(e); }
@@ -384,6 +384,7 @@ object WebPolyfill {
           try { out = origApply.call(this, ctx); }
           catch (e) { state.target.push('apply-threw ' + id + ': ' + err(e)); throw e; }
           state.target.push('apply ' + id);
+          patchLoaderAwait(ctx);
           if (id === 'dsh-client-resources') { watchAddresses(); }
           return out;
         };
@@ -488,6 +489,109 @@ object WebPolyfill {
         });
       } catch (e) { /* ignore */ }
     }
+    /**
+     * 【兼容修复 · 1.3.7】把 loader.await() 变成「等到插件名单真正安定」。
+     *
+     * 真机实测的根因：dsh 的 web boot 内核是
+     *   await entries.start(loader, manifest);   // 内部 await loader.await()
+     *   await loader.await();
+     *   nE(ctx, modules);                        // 一次性、无重试：任一 entry 不是 active 就 throw
+     * 而 `remote.*` 这些命名空间要等 dsh-api-remotes.apply 串行跑完 22 个挂载才出现，
+     * 于是「模块都下好了」与「服务全部就位」之间有窗口；内核在窗口里检查就 throw，
+     * boot 遮罩永久停在 Failed to load plugins —— Chrome 114 的 WebView 上尤其明显。
+     *
+     * 这里让 await() 在原有语义之后**再多等一会儿**，直到 entry 名单收敛（pending 归零）
+     * 或者确认卡住为止。有界、可退让：只要 3 秒没有进展、或总时长超过 20 秒就放手，
+     * 让原本的检查照旧跑（不会把「失败」伪装成「成功」，但会把真实缺失的服务记下来）。
+     */
+    function counts() {
+      var loader = loaderSvc();
+      if (!loader || typeof loader.entries !== 'function') { return null; }
+      var out = { total: 0, active: 0, failed: 0, pending: 0 };
+      try {
+        var list = loader.entries();
+        for (var i = 0; i < list.length; i++) {
+          out.total += 1;
+          var f = list[i] && list[i].fiber;
+          if (!f) { out.pending += 1; }
+          else if (f.state === 2) { out.active += 1; }
+          else if (f.state === 3) { out.failed += 1; }
+          else { out.pending += 1; }
+        }
+      } catch (e) { return null; }
+      return out;
+    }
+    /** 谁还没 active、卡在哪些服务上 —— 次数最多的排前面。 */
+    function missingServices() {
+      var loader = loaderSvc();
+      if (!loader) { return null; }
+      var root = loader.ctx, tally = {};
+      try {
+        var list = loader.entries();
+        for (var i = 0; i < list.length; i++) {
+          var f = list[i] && list[i].fiber;
+          if (!f || f.state === 2) { continue; }
+          var inj = f.inject || {};
+          for (var k in inj) {
+            try { if (root.get(k) === void 0) { tally[k] = (tally[k] || 0) + 1; } } catch (e) { /* ignore */ }
+          }
+        }
+      } catch (e) { return 'err'; }
+      return tally;
+    }
+    function loaderSvc() {
+      try {
+        var c = state.resCtx || state.wsfCtx;
+        if (!c || typeof c.get !== 'function') { return null; }
+        return c.get('loader') || null;
+      } catch (e) { return null; }
+    }
+    function patchLoaderAwait(ctx) {
+      try {
+        if (!ctx || typeof ctx.get !== 'function') { return; }
+        var loader = ctx.get('loader');
+        if (!loader || typeof loader.await !== 'function' || loader.__aptuidshAwait) { return; }
+        var orig = loader.await;
+        loader.await = function () {
+          var self = this, args = arguments, base;
+          try { base = orig.apply(self, args); }
+          catch (e) { throw e; }
+          state.awaited += 1;
+          return Promise.resolve(base).then(function (v) {
+            return settle(self).then(function () { return v; });
+          });
+        };
+        loader.__aptuidshAwait = true;
+        state.target.push('loader-await-patched');
+        state.roster = counts();
+      } catch (e) { /* 改不了就退化成原样，绝不影响启动 */ }
+    }
+    function settle(loader) {
+      return new Promise(function (resolve) {
+        var t0 = Date.now(), best = 1e9, progress = Date.now();
+        var timer = setInterval(function () {
+          var c = counts();
+          state.roster = c;
+          if (c === null) { clearInterval(timer); resolve(); return; }
+          if (c.pending < best) { best = c.pending; progress = Date.now(); }
+          if (c.pending === 0) {
+            clearInterval(timer);
+            state.missing = {};
+            state.target.push('roster-settled+' + (Date.now() - t0) + 'ms');
+            resolve();
+            return;
+          }
+          if (Date.now() - progress > 3000 || Date.now() - t0 > 20000) {
+            clearInterval(timer);
+            state.missing = missingServices();
+            state.target.push('roster-stuck pending=' + c.pending + ' active=' + c.active + ' failed=' + c.failed);
+            resolve();
+            return;
+          }
+        }, 50);
+      });
+    }
+    state.diag = { counts: counts, settle: settle, missingServices: missingServices, loaderSvc: loaderSvc };
     function keysOf(map) {
       try { return map ? Array.from(map.keys()).slice(0, 10) : null; } catch (e) { return 'err'; }
     }
@@ -534,6 +638,9 @@ object WebPolyfill {
           rw: svc('remote.workspaceFiles'),
           rs: svc('remote.session'),
           since: state.since,
+          roster: state.roster,
+          missing: state.missing,
+          awaited: state.awaited,
           panel: panel(),
           boot: bootOverlay()
         }));
