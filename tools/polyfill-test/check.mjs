@@ -61,14 +61,27 @@ ok('取证探针语法可解析', (() => {
   try { new Function(PROBE); return true; } catch { return false; }
 })(), 'new Function(PROBE) 抛了');
 ok('探针覆盖「活体注册模式会原地替换 load」这个真机坑',
-  PROBE.includes('wrapLoad()') && PROBE.includes('origCreate.call'),
-  '1.3.4 真机教训：只接一次 load 会数到 modules=1，必须在 create() 之后再接一次');
+  PROBE.includes('installAccessor') && PROBE.includes('origCreate.call')
+  && PROBE.includes("Object.defineProperty(loader, 'load'"),
+  '1.3.4 真机教训：只接一次 load 会数到 loadSeen=1；必须挂访问器自动接住被替换的 load');
 ok('探针直接读注册表（providers/records），不再靠计数推断',
   PROBE.includes('r.providers') && PROBE.includes('r.records'),
   '找不到 r.providers / r.records');
-ok('探针给 $mount 加了「一损俱损」缓解（用字符码拼方法名，Kotlin 原样字符串不能写美元+字母）',
-  PROBE.includes("String.fromCharCode(36) + 'mount'") && PROBE.includes('mount-failed'),
-  '找不到 String.fromCharCode(36) + \'mount\' / mount-failed');
+// 1.3.5 的教训：探针**绝不能改变 dsh 的行为**，否则会把「取证」变成「制造故障」。
+// 1.3.5 曾经 (a) 把注册对象换成 `{id,factory}` 新对象、(b) 包装 remote 的挂载方法
+// 来「缓解一损俱损」，结果真机上整页 boot 失败（`web boot: 35 entries did not activate`）。
+ok('探针保持注册对象的同一性（绝不用新对象替换 registration）',
+  !/return\s*\{\s*id\s*:/.test(PROBE) && PROBE.includes("Object.defineProperty(registration, 'factory'"),
+  '探针必须就地改 factory，而不是返回 {id, factory} 新对象');
+ok('探针不改变任何 dsh 行为（无 mount 缓解、无 create 之外的替换）',
+  !PROBE.includes('mount-failed') && !PROBE.includes('fromCharCode(36)') && !PROBE.includes('mount-threw'),
+  '探针里不该再出现 $mount 缓解相关的代码');
+ok('探针量出服务级联时延（since 时间线）',
+  PROBE.includes('state.since') && PROBE.includes("mark('remoteWorkspaceFiles'"),
+  '缺少 since 时间线');
+ok('探针抓 boot 遮罩原文（dsh 的激活失败清单）',
+  PROBE.includes('[data-dsh-boot]'),
+  '缺少 boot 遮罩抓取');
 ok('垫片源码非空且看起来是 JS', JS.includes('Math.sumPrecise') && JS.includes('Iterator'));
 
 // -------------------------------------------- 先抓原生实现的行为做基准
