@@ -63,6 +63,9 @@ object WebPolyfill {
         append("<script data-aptuidsh=\"layout-check\">")
         append(LAYOUT_CHECK)
         append("</script>")
+        append("<script data-aptuidsh=\"error-capture\">")
+        append(ERROR_CAPTURE)
+        append("</script>")
     }
 
     /** 在 HTML 里尽早插入垫片；插不进去就前置到文档最前面。 */
@@ -260,6 +263,53 @@ object WebPolyfill {
   } catch (e) {
     // 自检失败不影响任何功能
   }
+})();
+"""
+
+    /**
+     * 页面错误捕获：把 WebView 里的 JS 报错收集到 `window.__aptuidshErrors`。
+     *
+     * <h3>为什么需要它</h3>
+     * WebView 没有控制台可用，官方 Web UI 里任何一个客户端插件加载失败，用户只能看到一个
+     * 语焉不详的界面（例如文件预览直接显示「文件资源服务不可用」），而**真正的原因
+     * （哪个模块抛了什么）完全看不到** —— 本机也没有 logcat 可看。
+     * 这里把 `error` / `unhandledrejection` / `console.error` / `console.warn` 都记下来，
+     * 由 [WebUiActivity] 定时轮询并转发进环境控制台日志，用户「一键复制全部日志」即可回传。
+     *
+     * <p>只保留最近 60 条，且所有操作都吞异常 —— 诊断代码绝不能把页面搞坏。
+     */
+    private const val ERROR_CAPTURE = """
+(function () {
+  try {
+    var g = window;
+    if (g.__aptuidshErrors) { return; }
+    var list = g.__aptuidshErrors = [];
+    function push(kind, msg) {
+      try {
+        list.push('[' + kind + '] ' + String(msg).slice(0, 600));
+        if (list.length > 60) { list.shift(); }
+      } catch (e) { /* 记不上就算了 */ }
+    }
+    g.addEventListener('error', function (e) {
+      push('error', ((e && e.message) || e) + ' @ ' + ((e && e.filename) || '?') + ':' + ((e && e.lineno) || 0));
+    }, true);
+    g.addEventListener('unhandledrejection', function (e) {
+      var r = e && e.reason;
+      push('reject', (r && (r.stack || r.message)) || r);
+    });
+    ['error', 'warn'].forEach(function (level) {
+      var orig = console[level];
+      if (typeof orig !== 'function') { return; }
+      console[level] = function () {
+        try {
+          push('console.' + level, Array.prototype.map.call(arguments, function (a) {
+            return (a && (a.stack || a.message)) || String(a);
+          }).join(' '));
+        } catch (e) { /* ignore */ }
+        return orig.apply(console, arguments);
+      };
+    });
+  } catch (e) { /* 诊断脚本绝不能影响页面 */ }
 })();
 """
 

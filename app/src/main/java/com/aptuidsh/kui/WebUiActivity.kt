@@ -3,6 +3,8 @@ package com.aptuidsh.kui
 import android.annotation.SuppressLint
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.view.ViewGroup
 import android.webkit.CookieManager
@@ -69,6 +71,33 @@ class WebUiActivity : ComponentActivity() {
 
     private var webView: WebView? = null
 
+    /**
+     * 页面错误轮询：把 WebView 里收集到的 JS 报错转发进环境控制台日志。
+     *
+     * <p>WebView 没有控制台，官方界面里任何一个客户端插件加载失败，用户只会看到一个
+     * 语焉不详的界面（例如文件预览显示「文件资源服务不可用」），真正的原因
+     * （哪个模块、抛了什么）完全拿不到 —— 本机也没有 logcat。这里每 2 秒拉一次
+     * `window.__aptuidshErrors` 的新增项，写进 EnvLog；用户用环境控制台的
+     * 「一键复制日志」就能把一手证据回传。
+     */
+    private val errorPoller = object : Runnable {
+        override fun run() {
+            val wv = webView
+            if (wv != null) {
+                wv.evaluateJavascript(
+                    "(function(){try{var e=window.__aptuidshErrors||[];" +
+                            "var out=e.slice(" + reportedErrors + ").join('\\n');" +
+                            "return out;}catch(err){return '';}})()",
+                ) { result -> drainWebErrors(result) }
+            }
+            handler.postDelayed(this, 2000)
+        }
+    }
+    private val handler = Handler(Looper.getMainLooper())
+
+    /** 已经转发过多少条，避免重复刷日志。 */
+    private var reportedErrors = 0
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
@@ -80,6 +109,29 @@ class WebUiActivity : ComponentActivity() {
                     onAttach = { wv -> webView = wv },
                 )
             }
+        }
+        handler.postDelayed(errorPoller, 3000)
+    }
+
+    /**
+     * 解码 evaluateJavascript 回传的字符串并把新增的网页报错写进日志。
+     *
+     * <p>`evaluateJavascript` 回传的是 **JSON 字符串字面量**（带引号与转义），
+     * 所以要先用 JSONTokener 解一次，不能直接当普通文本用。
+     */
+    private fun drainWebErrors(raw: String?) {
+        if (raw.isNullOrEmpty() || raw == "null") return
+        val text = try {
+            val v = org.json.JSONTokener(raw).nextValue()
+            if (v is String) v else return
+        } catch (t: Throwable) {
+            return
+        }
+        val lines = text.split('\n').filter { it.isNotBlank() }
+        if (lines.isEmpty()) return
+        reportedErrors += lines.size
+        for (line in lines) {
+            EnvLog.w("[web] " + line)
         }
     }
 
@@ -244,6 +296,7 @@ class WebUiActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        handler.removeCallbacks(errorPoller)
         webView?.let {
             (it.parent as? ViewGroup)?.removeView(it)
             it.destroy()
