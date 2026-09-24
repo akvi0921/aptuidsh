@@ -422,25 +422,45 @@ object WebPolyfill {
   }
 
   // --- RegExp.escape (Chrome 136) ---
-  // 转义「在正则里有语法含义」的字符 + '/'；
-  // 首字符若是字母或数字，按规范用 \xHH 形式，避免被当成后向引用或量词。
+  // 规则逐码点对着 Chrome 原生实现推导出来的（第一/非第一位置分别对拍），共 6 条：
+  //   1) 语法字符（脱字符/美元符/反斜杠/点/星/加/问/圆括号/方括号/花括号/竖线）与 '/'
+  //   2) 首字符若是 ASCII 字母或数字 → \xHH（否则会被当成后向引用或量词）
+  //   3) 其余 ASCII 单词字符（字母 / 数字 / 下划线）→ 原样
+  //   4) \t \n \v \f \r → 短转义
+  //   5) 其它 ASCII 标点与空白分隔符（含 NBSP）→ \xHH
+  //   6) 其余一律原样 —— 非 ASCII 字符在正则里没有语法含义，原样恒安全
+  // 字符集刻意写成 \xHH 字面量：Kotlin 原样字符串里美元符号是模板起始符，
+  // 而且反引号/引号直接写进 JS 字符串也容易出错。
   if (typeof RegExp !== 'undefined' && typeof RegExp.escape !== 'function') {
+    var SYNTAX = '\x5e\x24\x5c\x2e\x2a\x2b\x3f\x28\x29\x5b\x5d\x7b\x7d\x7c';
+    var PUNCT = '\x20\x21\x22\x23\x25\x26\x27\x2c\x2d\x3a\x3b\x3c\x3d\x3e\x40\x60\x7e\xa0';
+    function hexEsc(n) {
+      if (n <= 255) {
+        var h2 = n.toString(16);
+        while (h2.length < 2) { h2 = '0' + h2; }
+        return '\x5cx' + h2;
+      }
+      var u4 = n.toString(16);
+      while (u4.length < 4) { u4 = '0' + u4; }
+      return '\x5cu' + u4;
+    }
+    function isWordChar(n) {
+      return (n >= 48 && n <= 57) || (n >= 65 && n <= 90) || (n >= 97 && n <= 122) || n === 95;
+    }
     RegExp.escape = function (str) {
-      var s = String(str);
-      var out = '';
+      var s = String(str), out = '';
       for (var i = 0; i < s.length; i++) {
-        var c = s.charAt(i);
-        // 注意：这里刻意逐字符拼，不用 String.replace 的美元符号替换（Kotlin 原样字符串里
-        // 美元符号是模板起始符，整个文件必须避免出现它）；反斜杠与脱字符用 \x 转义写。
-        if (i === 0 && /[0-9A-Za-z]/.test(c)) {
-          var hex = c.charCodeAt(0).toString(16);
-          while (hex.length < 2) { hex = '0' + hex; }
-          out += '\x5cx' + hex;
-        } else if (/[\x5e\x24\x5c.*+?()[\x5d{}|\/]/.test(c)) {
-          out += '\x5c' + c;
-        } else {
-          out += c;
-        }
+        var c = s.charAt(i), n = c.charCodeAt(0);
+        if (SYNTAX.indexOf(c) >= 0 || c === '/') { out += '\x5c' + c; continue; }
+        if (i === 0 && n !== 95 && isWordChar(n)) { out += hexEsc(n); continue; }
+        if (isWordChar(n)) { out += c; continue; }
+        if (n === 9) { out += '\x5ct'; continue; }
+        if (n === 10) { out += '\x5cn'; continue; }
+        if (n === 11) { out += '\x5cv'; continue; }
+        if (n === 12) { out += '\x5cf'; continue; }
+        if (n === 13) { out += '\x5cr'; continue; }
+        if (PUNCT.indexOf(c) >= 0) { out += hexEsc(n); continue; }
+        out += c;
       }
       return out;
     };

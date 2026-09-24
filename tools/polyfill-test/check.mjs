@@ -54,6 +54,76 @@ ok('垫片源码里没有美元符号（Kotlin 原样字符串的模板起始符
   `JS 有 ${(JS.match(/\$/g) || []).length} 个，GUARD 有 ${(GUARD.match(/\$/g) || []).length} 个`);
 ok('垫片源码非空且看起来是 JS', JS.includes('Math.sumPrecise') && JS.includes('Iterator'));
 
+// -------------------------------------------- 先抓原生实现的行为做基准
+// 本机 Node 26 已自带这批「新 API」，因此可以做**差分对拍**：
+// 先记下原生结果，删掉 API、装垫片，再逐条比对。这比手写期望值可靠得多
+// （实战教训：RegExp.escape 的转义规则我一开始凭记忆写错了，就是对拍抓出来的）。
+const CORPUS = (() => {
+  const out = [];
+  for (let c = 0; c < 256; c++) {
+    const ch = String.fromCharCode(c);
+    out.push(ch, 'Z' + ch + 'Y', 'a' + ch, ch + 'a');
+  }
+  out.push(
+    '', 'a.b', '1a', 'abc', '(*.*)', 'Buy it. use it. break it. fix it.',
+    '${}', 'a-b', '_x', 'price: 3.5 (USD) [x]', 'a\\b', 'a/b', '^$', '|?',
+    '你好世界', 'a中b', '😀x', 'a\tb', 'a\nb', 'NBSP\u00a0here',
+    'Chapter 1.2.3', 'Fig. 4(a)', 'x^2 + y^2 = z^2',
+  );
+  // 伪随机 ASCII，覆盖组合情况
+  let seed = 12345;
+  const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  for (let i = 0; i < 300; i++) {
+    let s = '';
+    const len = 1 + Math.floor(rnd() * 12);
+    for (let j = 0; j < len; j++) s += String.fromCharCode(32 + Math.floor(rnd() * 95));
+    out.push(s);
+  }
+  return out;
+})();
+
+const BYTES_CORPUS = (() => {
+  const out = [];
+  for (let n = 0; n <= 40; n++) {
+    const a = new Uint8Array(n);
+    for (let i = 0; i < n; i++) a[i] = (i * 37 + n * 11) & 255;
+    out.push(a);
+  }
+  let seed = 999;
+  const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  for (let k = 0; k < 120; k++) {
+    const a = new Uint8Array(1 + Math.floor(rnd() * 64));
+    for (let i = 0; i < a.length; i++) a[i] = Math.floor(rnd() * 256);
+    out.push(a);
+  }
+  return out;
+})();
+
+const NUM_CORPUS = [
+  [], [1], [1, 2, 3], [0.1, 0.2], [1e20, 1, -1e20], [1e-20, 1, -1],
+  Array.from({ length: 100 }, (_, i) => (i % 7) * 0.1), [Number.MAX_VALUE, Number.MAX_VALUE, -Number.MAX_VALUE],
+];
+
+const nativeRef = {};
+nativeRef.hasEscape = typeof RegExp.escape === 'function';
+nativeRef.hasBase64 = typeof Uint8Array.fromBase64 === 'function'
+  && typeof Uint8Array.prototype.toBase64 === 'function';
+nativeRef.hasHex = typeof Uint8Array.fromHex === 'function'
+  && typeof Uint8Array.prototype.toHex === 'function';
+nativeRef.hasSum = typeof Math.sumPrecise === 'function';
+nativeRef.hasUrlParse = typeof URL.parse === 'function';
+
+if (nativeRef.hasEscape) nativeRef.escape = CORPUS.map((s) => RegExp.escape(s));
+if (nativeRef.hasBase64) nativeRef.toBase64 = BYTES_CORPUS.map((b) => b.toBase64());
+if (nativeRef.hasBase64) nativeRef.fromBase64 = nativeRef.toBase64.map((s) => Array.from(Uint8Array.fromBase64(s)));
+if (nativeRef.hasHex) nativeRef.toHex = BYTES_CORPUS.map((b) => b.toHex());
+if (nativeRef.hasSum) nativeRef.sum = NUM_CORPUS.map((xs) => Math.sumPrecise(xs));
+if (nativeRef.hasUrlParse) nativeRef.urlParse = CORPUS.map((s) => {
+  const u = URL.parse(s, 'https://example.com/base/');
+  return u === null ? null : u.href;
+});
+console.log(`原生基准：escape=${nativeRef.hasEscape} base64=${nativeRef.hasBase64} hex=${nativeRef.hasHex} sumPrecise=${nativeRef.hasSum} URL.parse=${nativeRef.hasUrlParse}`);
+
 // ------------------------------------------------------ 模拟 Chrome 114
 const NEW_APIS = [
   ['Iterator', null],
@@ -163,7 +233,7 @@ ok('URL.parse 已存在', typeof URL.parse === 'function');
 // RegExp.escape
 ok('RegExp.escape 已存在', typeof RegExp.escape === 'function');
 {
-  eq('RegExp.escape 转义点号', RegExp.escape('a.b'), 'a\\.b');
+  eq('RegExp.escape 转义点号（首字符也按规范十六进制转义）', RegExp.escape('a.b'), '\\x61\\.b');
   eq('RegExp.escape 空串', RegExp.escape(''), '');
   eq('RegExp.escape 首字符数字用 \\x 形式', RegExp.escape('1a'), '\x5cx31a');
   const src = 'price: 3.5 (USD) [x]';
@@ -284,6 +354,66 @@ ok('第二次执行后 Uint8Array.toBase64 仍可用', new Uint8Array([1]).toBas
 let guardThrew = false;
 try { (0, eval)(GUARD); } catch (e) { guardThrew = true; }
 ok('worker 守卫在无 document 环境下不抛异常', !guardThrew);
+
+console.log('\n---------- C. 与原生实现差分对拍 ---------');
+{
+  let mismatches = 0, first = null;
+  const cmp = (label, mine, native) => {
+    const a = JSON.stringify(mine), b = JSON.stringify(native);
+    if (a !== b) { mismatches++; if (!first) first = `${label}\n      垫片 ${a}\n      原生 ${b}`; }
+  };
+
+  if (nativeRef.hasEscape) {
+    CORPUS.forEach((s, i) => cmp(`RegExp.escape(${JSON.stringify(s)})`, RegExp.escape(s), nativeRef.escape[i]));
+    ok(`RegExp.escape 与原生完全一致（${CORPUS.length} 条样本）`, mismatches === 0, first);
+  } else {
+    console.log('  （本机 Node 没有原生 RegExp.escape，跳过该项对拍）');
+  }
+
+  if (nativeRef.hasBase64) {
+    let m2 = 0, f2 = null;
+    BYTES_CORPUS.forEach((b, i) => {
+      const mine = b.toBase64();
+      if (mine !== nativeRef.toBase64[i]) { m2++; if (!f2) f2 = `第${i}条 ${b.length}字节: 垫片 ${mine} / 原生 ${nativeRef.toBase64[i]}`; }
+      const back = Array.from(Uint8Array.fromBase64(mine));
+      if (JSON.stringify(back) !== JSON.stringify(nativeRef.fromBase64[i])) { m2++; if (!f2) f2 = `第${i}条回环不一致`; }
+    });
+    ok(`toBase64 与原生一致（${BYTES_CORPUS.length} 条样本）`, m2 === 0, f2);
+  } else {
+    console.log('  （本机 Node 没有原生 toBase64，跳过该项对拍）');
+  }
+
+  if (nativeRef.hasHex) {
+    let m3 = 0, f3 = null;
+    BYTES_CORPUS.forEach((b, i) => {
+      if (b.toHex() !== nativeRef.toHex[i]) { m3++; if (!f3) f3 = `第${i}条: 垫片 ${b.toHex()} / 原生 ${nativeRef.toHex[i]}`; }
+    });
+    ok(`toHex 与原生一致（${BYTES_CORPUS.length} 条样本）`, m3 === 0, f3);
+  }
+
+  if (nativeRef.hasSum) {
+    let m4 = 0, f4 = null;
+    NUM_CORPUS.forEach((xs, i) => {
+      const mine = Math.sumPrecise(xs);
+      if (!Object.is(mine, nativeRef.sum[i])) { m4++; if (!f4) f4 = `第${i}条: 垫片 ${mine} / 原生 ${nativeRef.sum[i]}`; }
+    });
+    ok(`Math.sumPrecise 与原生一致（${NUM_CORPUS.length} 条样本）`, m4 === 0, f4);
+  } else {
+    console.log('  （本机 Node 没有原生 Math.sumPrecise，跳过该项对拍）');
+  }
+
+  if (nativeRef.hasUrlParse) {
+    let m5 = 0, f5 = null;
+    CORPUS.forEach((s, i) => {
+      const u = URL.parse(s, 'https://example.com/base/');
+      const mine = u === null ? null : u.href;
+      if (mine !== nativeRef.urlParse[i]) { m5++; if (!f5) f5 = `${JSON.stringify(s)}: 垫片 ${mine} / 原生 ${nativeRef.urlParse[i]}`; }
+    });
+    ok(`URL.parse 与原生一致（${CORPUS.length} 条样本）`, m5 === 0, f5);
+  } else {
+    console.log('  （本机 Node 没有原生 URL.parse，跳过该项对拍）');
+  }
+}
 
 console.log('\n========== 结果 ==========');
 console.log(`通过 ${pass} / 失败 ${fail}`);
