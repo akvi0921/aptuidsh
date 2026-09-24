@@ -21,9 +21,9 @@ APTUIDSH 自身代码为本项目所有；APK 内**打包**了下列第三方组
 
 ## 2. DeepSeek Harness（dsh）—— 内置的本体
 
-- 来源：`npm @deepseek-ai/dsh@0.1.5-rc.1`
+- 来源：`npm @deepseek-ai/dsh@0.1.7-rc.1`（npm `next` 标签）
 - 许可：**MIT**
-- 打包内容：完整全局安装（含 190 个顶层依赖目录、`@deepseek-ai` 下 240 个官方包）
+- 打包内容：完整全局安装（含 157 个顶层依赖目录、`@deepseek-ai` 下 277 个官方包）
 
 ## 3. Node.js
 
@@ -67,12 +67,16 @@ dsh 的依赖树含大量第三方 npm 包，其中值得单独列出的是带**
 
 | 组件 | 许可 | 用途 |
 |---|---|---|
-| `org.json:json:20240303` | JSON License | `tools/jvmtest` 适配层测试台 |
+| Gradle / Android Gradle Plugin | Apache-2.0 | 构建 |
+| Node.js（宿主侧） | MIT | 跑 `tools/polyfill-test/` 兼容层自测 |
 
 ---
 
-## 前端来源说明
+## 原生侧来源说明
 
-APP 的原生界面（Compose UI）复制并改造自**用户自有项目 `dsh-aui`**，非第三方开源项目。
-改造内容：包名 `com.dshaui.kui` → `com.aptuidsh.kui`、应用名 DSHAUI → APTUIDSH、
-后端端口 3080 → 3081、以及面向 dsh 0.1.5 的协议适配层。
+原生侧（Compose UI 主题、proroot 环境管理、rootfs 生命周期、鉴权桥）由作者自有项目
+`dsh-aui` 改造而来，非第三方开源项目；包名 `com.dshaui.kui` → `com.aptuidsh.kui`、
+端口 3080 → 3081。
+
+**自 1.3.0 起自研前端已全部移除**，原生侧只保留「装/启/停环境 + 内嵌官方 Web UI」，
+原先面向 dsh 0.1.1~0.1.5 的协议适配层（`net/`、`file/`、自研聊天与文件浏览器等）已整体删除。

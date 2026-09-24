@@ -1,4 +1,19 @@
-# 「文件资源服务不可用」取证与排查（1.3.4 → 1.3.5）
+# WebView 兼容：两个根因与完整取证（1.3.4 → 1.4.0）
+
+> **结论摘要**（细节见下文各节）
+>
+> 真机症状有两个，先是「工作区文件打不开，预览显示**文件资源服务不可用**」，
+> 后来演变成**整页** `HARNESS / Failed to load plugins`。追到底，是两个互不相同的
+> 根因，都出在这台机器只有 **Chrome 114** 的系统 WebView 上：
+>
+> | # | 根因 | 表现 | 修法 | 版本 |
+> |---|---|---|---|---|
+> | 1 | **WebView 不解析「非特殊 scheme」的 authority**：`new URL('dsh-resource://file/…').hostname` 为空、`pathname` 多出 `//file`。于是 dsh 的 `protocolOf()` 返回 undefined，`file` provider 永远匹配不上 → status 恒为 `none` | 文件预览永久显示「文件资源服务不可用」 | 垫片里给 `URL.prototype` 的 `hostname`/`pathname` 打补丁（特性探测 + 三条件判定，现代内核零副作用） | **1.3.9** |
+> | 2 | **dsh web boot 的竞态**：内核只 `await loader.await()`（等模块加载完）就**一次性、无重试**地要求所有插件 active；而 `remote.*` 命名空间要等 22 次串行 `$mount` 才出现 | 整页停在 `Failed to load plugins`（34~35 条 pending） | 拿到 cordis `ctx` 后把 `loader.await()` 包成「等插件名单收敛」，有界可退让 | **1.3.7** |
+>
+> 过程里还踩了一次自己的坑：**取证脚本必须纯观测**。1.3.5 为了「缓解」而改变了 dsh 的行为，
+> 反而制造了真实故障、差点把根因带偏（§14 有完整对比表）。
+
 
 > 现象：官方 Web UI 里点开工作区文件，预览区显示 **「文件资源服务不可用」**。
 > 本版（1.3.4）不猜测、不下结论，而是**先把证据取回来**：注入一段取证脚本，
@@ -412,3 +427,348 @@ roster 没激活完时，预览面板拿不到 `file` provider，`meta.status` �
 | `tools/polyfill-test/check.mjs` | 断言改为守护「探针不得改变 dsh 行为」 |
 
 自检：`bash tools/polyfill-test/run.sh` → **通过 116 / 失败 0**。
+
+---
+
+# 【真机实测三】1.3.6 纯观测版仍然失败 —— 根因确定，1.3.7 出手
+
+## 17. 1.3.6 真机结果：探针无罪
+
+1.3.6 的探针已经是**纯观测**（不换注册对象、不包挂载方法、只挂一个 `load` 访问器），
+真机仍然报 `web boot: 34 entries did not activate`。
+
+**这条否定结果很重要**：1.3.5 的「加重」和 1.3.6 的「减重」结果一样，
+说明这个 boot 失败**不是探针造成的**——1.3.4 那次 boot 干净是**赢了这个竞态**，
+而不是因为探针动作少。之前我怀疑自己的探针，方向错了（虽然 1.3.5 的多余改动仍然该删）。
+
+## 18. 根因链（已闭环）
+
+从 shell bundle 挖出的内核 + `dsh-client-modules` 的 entry 机制，拼起来是这样：
+
+```js
+// shell（web boot 内核）
+await e.modules.entries.start(a, o);
+for (const f of a.entries()) if (f.fiber === void 0) s?.(f.options.name, "failed");
+await a.await();
+nE(n, e.modules);                    // 一次性、无重试
+
+function nE(e, n) {
+  for (const s of e.loader.entries()) {
+    const u = a7[s.fiber.state];
+    if (u !== "active") o.push(`${a}: pending (waiting for services: …)`);
+  }
+  if (o.length > 0) throw new Error(`web boot: ${o.length} entries did not activate\n…`);
+}
+```
+
+```js
+// dsh-client-modules：entries.start 内部
+await loader.await();
+for (const [id, entry] of this.managed) {
+  if (entry.fiber?.state === ACTIVE) continue;
+  await entry.fiber.await();                                   // ← 对 pending 的 fiber 也会返回
+  failures.push({ id, message: `client-modules: ${id} is waiting for activation` });
+}
+```
+
+而 `remote.*` 这些命名空间，来自 `dsh-api-remotes.apply` 里**串行**的 22 次
+`await ctx.remote.$mount(contribution)`：
+
+```js
+async function apply(ctx) {
+  const disposers = [];
+  try { for (const contribution of [22 个]) disposers.push(await ctx.remote.$mount(contribution)); }
+  catch (error) { for (const dispose of disposers.reverse()) await dispose(); throw error; }
+}
+```
+
+于是链条是：
+**模块全部加载完（快） → 22 个命名空间串行挂载（慢） → `sessions`/`remote.*` 才存在 →
+`dsh-client-ui-*` 才可能 active**。
+内核恰好在「模块加载完」之后立刻做一次性全量检查 —— 撞上窗口就 throw，
+boot 遮罩永久停在 Failed to load plugins。
+
+`remote.session` 缺 → `dsh-api-session-controller` pending → `sessions` 缺 →
+34 个 `dsh-client-ui-*` 全部 pending。这正好解释了那 34 条清单的形状。
+
+**同一个竞态的轻档**：窗口内预览面板拿不到 `file` provider，`meta.status` 就是 `"none"`，
+于是显示「文件资源服务不可用」。所以「文件打不开」和「整页 boot 失败」是**同一个 bug**。
+
+## 19. 1.3.7 的修复：让 `loader.await()` 等到名单真正收敛
+
+这是本仓库**唯一一处有意改变 dsh 行为**的补丁，所以做了三件事：有界、可退让、可单测。
+
+```js
+function patchLoaderAwait(ctx) {
+  var loader = ctx.get('loader');                       // shell 里 reflect.provide("loader", this)
+  if (!loader || typeof loader.await !== 'function' || loader.__aptuidshAwait) { return; }
+  var orig = loader.await;
+  loader.await = function () {
+    var base = orig.apply(this, arguments);
+    state.awaited += 1;
+    return Promise.resolve(base).then(function (v) { return settle(loader).then(function () { return v; }); });
+  };
+  loader.__aptuidshAwait = true;
+}
+```
+
+`settle()` 每 50ms 读一次 entry 名单（`loader.entries()` → `fiber.state`，
+`0=PENDING 1=LOADING 2=ACTIVE 3=FAILED`），直到：
+
+- **`pending === 0`** → 收敛，正常放行（记 `roster-settled+<耗时>ms`）；
+- **无进展超过 3 秒**，或**总时长超过 20 秒** → 放手，让原本的检查照旧跑，
+  并把 `roster-stuck pending=… active=… failed=…` 与**缺失服务计数**记下来
+  （`missingServices()`：谁还没 active、卡在哪些服务上、各有多少个插件在等）。
+
+关键点：**它绝不会把「失败」伪装成「成功」**——卡住就退让，原检查照常执行；
+它只是把「检查得太早」这个缺陷补上。
+
+### 这个补丁有真实计时单测（`tools/polyfill-test/settle-test.mjs`）
+
+用真实时钟（不 mock 计时器，避免测出假绿）在 Node 里配 window/document 假体跑：
+
+```
+ok  counts() 认得全 active
+ok  已收敛时 settle 立刻返回(<300ms)
+ok  竞态场景等到收敛(>=400ms) 且不超时(<2000ms)  [实测 408ms]
+ok  卡死时约 3 秒放手(2500~6000ms)  [实测 3076ms]
+ok  放手后记下 roster-stuck
+ok  拿不到 loader 时 counts() 返回 null 而不抛
+--- settle 单测：通过 6 / 失败 0
+```
+
+已接入 `tools/polyfill-test/run.sh`，成为交付前门禁的一部分
+（`node check.mjs` + `node settle-test.mjs`，后者从 Kotlin 里抽真实源码）。
+
+## 20. 1.3.7 装完后看什么
+
+| 日志字段 | 含义 | 期望 |
+|----------|------|------|
+| `target` 含 `loader-await-patched` | 补丁装上去了 | 必须有 |
+| `roster-settled+NNNms` | 等了多久才收敛 | 几百 ms ~ 几秒 |
+| `boot` | boot 遮罩原文 | 应为 `HARNESS Loading plugins…` |
+| `roster-stuck …` + `missing` | 卡住时缺哪些服务 | 若出现，`missing` 直接指向下一个要修的点 |
+
+如果 `roster-settled` 出现且 `boot` 变成 Loading —— 修复成功；
+如果出现 `roster-stuck`，`missing` 会告诉我到底哪个 provider 永远不来，
+那就是下一个（也更靠下的）修点。
+
+## 21. 版本总览
+
+| 版本 | 关键改动 | 真机结果 |
+|------|----------|----------|
+| 1.3.4 | 第一版探针（只接一次 `load`，接空） | boot 干净，文件预览不可用 |
+| 1.3.5 | 探针加「mount 缓解」+ 换注册对象 | boot 35 条 pending，整页失败 |
+| 1.3.6 | 探针回退纯观测 + `since` 时间线 + 截断 600→4000 | **仍 34 条 pending** ⇒ 探针无罪，根因是竞态 |
+| **1.3.7** | **`loader.await()` 等到名单收敛（有界、可退让、有计时单测）** | 待验证 |
+
+---
+
+# 【真机实测四】1.3.7 修好了 boot；「文件打不开」收窄到最后一个矛盾
+
+## 22. boot 竞态：已修复（真机确认）
+
+```
+01:10:09 WARN [web] [probe] {"tag":"t0","at":3204,"load":63,"res":true,"rem":true,"wsf":true,
+  "target":["apply dsh-client-resources","loader-await-patched","apply dsh-api-remotes",
+            "apply dsh-api-workspace-files","roster-settled+194ms","roster-settled+193ms",
+            "roster-settled+58ms","roster-settled+228ms"],
+  "boot":null, ...}
+```
+
+- `loader-await-patched` 在位，`roster-settled` 四次，耗时 **58~228ms**；
+- **`boot: null`** —— 页面上没有 boot 遮罩，`HARNESS / Failed to load plugins` **消失**；
+- 整份日志里**再没有** `web boot: N entries did not activate`。
+
+即：让 `loader.await()` 等到名单收敛，检查就落在窗口之后了；而且收敛本身只要 ~200ms，
+**对正常启动几乎没有额外开销**。整页不可用的问题解决。
+
+## 23. 「文件打不开」收窄到一个矛盾
+
+同一条日志给出了关键数据：
+
+```
+providers: ["subagentchat","plan","file"]          ← file provider 已注册
+records:   ["sidebar://files",
+            "dsh-resource://file/session/session-932f98d1-ad85-4d50-9638-fee4aa9cfa6b/make-test-image.js"]
+panel:     {"text":"文件资源服务不可用","path":null,"body":false}
+```
+
+**两条旧分支都死了**：
+
+- 「provider 没注册」→ 错。`providers` 里明明有 `file`。
+- 「地址不合法」→ 错。地址是标准的 `dsh-resource://file/session/<sid>/<path>`。
+
+顺带查清了 `sidebar://files` / `sidebar://guide` 的来历：它们是
+`dsh-client-ui-sidebar-right` 里 `pageAddress(kind)` 造的**页面标签记账地址**
+（`sidebar://<kind>`），本来就没有 provider，属于噪音，已从记录打印里过滤掉。
+
+于是剩下唯一的矛盾：**provider 在、地址对，`meta.status` 却是 `"none"`。**
+
+按 `dsh-client-resources` 的代码，`none` 只有一个来源：
+
+```js
+create(address) {
+  const protocol = protocolOf(address);                    // ← 这里
+  const store = createSnapshotStore(idle(this.providerOf(protocol) === void 0 ? "none" : "loading"));
+}
+function protocolOf(address) {
+  parsed = new URL(address);
+  if (parsed.protocol !== `dsh-resource:`) return void 0;
+  return parsed.hostname === "" ? void 0 : parsed.hostname.toLowerCase();   // ← 或这里
+}
+```
+
+只要 `protocolOf(address)` 返回 `undefined`，记录就**永久卡在 `"none"`**，
+而且 `register()` 里那句补救（`for (const record of this.recordsOf(protocol)) this.attach(record)`）
+也**永远匹配不到它**（因为它 `record.protocol` 也是 undefined）——
+完美解释「provider 明明在注册表里，面板却一口咬定不可用」。
+
+## 24. 1.3.8：把这条记录的真身打出来
+
+新增 `recs()`：逐条打印注册表记录（跳过 `sidebar://*` 噪音），每条给出
+
+| 字段 | 含义 |
+|------|------|
+| `a` | 地址末 64 字符 |
+| `proto` | **注册表自己算出来的** protocol（`UNDEFINED` 即 `protocolOf` 没认出来） |
+| `st` | 当前 status：`none` / `loading` / `live` / `failed` |
+| `h` | holders（有几个订阅者） |
+| `u` | 探针**现场用 `new URL()` 再解一遍**：`protocol\|hostname\|pathLen` |
+| `f` | 失败原因（status=failed 时） |
+
+另外给 `settle` 加了统计（`calls` / `maxTotal` / `maxPending` / `waits`），
+用来确认那个 boot 补丁**到底有没有真的等过东西**。
+
+### 三种读数对应三种修法
+
+| 读数 | 结论 | 修法 |
+|------|------|------|
+| `proto: "UNDEFINED"` | 这个 WebView 的 `new URL()` 对非特殊 scheme 的 hostname 解析异常 | 在垫片里给 `URL` 打补丁（只针对非特殊 scheme 的 hostname） |
+| `proto: "file"` 且 `st: "none"` | 记录先于 provider 建立，而 `attach()` 的补救没生效 | 在 provider 注册后主动把已有记录 `attach` 一遍 |
+| `st: "live"` | 文件其实读得到，报错的是**另一个面板/标签** | 转向排查是哪个 tab 在使用 `sidebar://*` 这类地址渲染 TextPreview |
+
+---
+
+# 【真机实测五】根因确认：Chrome 114 的 WebView 不解析非特殊 scheme 的 authority
+
+## 25. 决定性读数
+
+1.3.8 打出的 `recs` 里，那条文件记录的真身是：
+
+```json
+{"a":"/session-932f98d1-ad85-4d50-9638-fee4aa9cfa6b/make-test-image.js",
+ "proto":"UNDEFINED","st":"none","h":3,
+ "u":"dsh-resource:||78","f":null}
+```
+
+`u` 是探针**现场用 `new URL()` 再解一遍**的结果，格式为 `protocol|hostname|pathname长度`：
+
+| | protocol | hostname | pathname 长度 |
+|---|---|---|---|
+| **真机 Chrome/114.0.5735.196 WebView** | `dsh-resource:` | **（空）** | **78** |
+| Node（规范实现） | `dsh-resource:` | `file` | 72 |
+
+78 恰好比 72 多 6 —— 正好是 `//file` 那 6 个字符。也就是说：
+
+> **这个内核根本没有解析 non-special scheme 的 authority，把 `//file` 整段当成了路径的一部分。**
+
+完整串是 `dsh-resource://file/session/session-932f98d1-…/make-test-image.js`，
+规范解析应得 `hostname='file'`、`pathname='/session/…'`；真机给出 `hostname=''`、`pathname='//file/session/…'`。
+
+## 26. 为什么这一条就足以让文件永远打不开
+
+`dsh-client-resources` 靠 hostname 判断地址归哪个 provider 管：
+
+```js
+function protocolOf(address) {
+  parsed = new URL(address);
+  if (parsed.protocol !== `dsh-resource:`) return void 0;
+  return parsed.hostname === "" ? void 0 : parsed.hostname.toLowerCase();   // ← 这里返回 undefined
+}
+```
+
+于是链条是（每一环都由读数证实）：
+
+1. `protocolOf(文件地址)` → `undefined`（因为 hostname 为空）；
+2. `record.protocol` 也就是 `undefined`（`recs.proto` 读数正是 `UNDEFINED`）；
+3. `providerOf(undefined)` → `undefined` → 记录初始 status 就是 `"none"`（`recs.st` 读数正是 `none`）；
+4. provider 注册时那句补救 `for (const record of this.recordsOf(protocol)) this.attach(record)`
+   **永远匹配不到它** —— 因为它自己的 `record.protocol` 也是 `undefined`；
+5. 于是 `meta.status` 永远是 `"none"`，预览**永久**显示「文件资源服务不可用」。
+
+同时排除了所有其他假设：
+
+- **不是** provider 没注册 —— `providers: ["subagentchat","plan","file"]`；
+- **不是**地址字符串不合法 —— 它是标准的 `dsh-resource://file/session/<sid>/<path>`；
+- **不是**记录先于 provider 建立 —— 那种情况会被 `attach()` 补救，而这里连补救的匹配都进不去；
+- **不是**我的垫片或探针 —— 我已核查垫片只**新增** `URL.parse` 静态方法，
+  从不触碰 `URL.prototype`；也 grep 过全部 63 个客户端 bundle，没有任何一处替换 `window.URL`。
+
+## 27. 1.3.9 的修复
+
+在垫片里补上 authority 解析，**先特性探测、只补被误判的那一种情形**：
+
+```js
+var compliant = new U('dsh-probe://host/path').hostname === 'host';
+if (compliant) { return; }        // 内核正确：一个字都不改
+```
+
+只在**三个条件同时成立**时才判定为「authority 被当成了路径」，才动手：
+
+1. 原生 `hostname` 为空；
+2. 原生 `pathname` 以 `//` 开头；
+3. 串里确实写了 `scheme://authority`。
+
+命中就补两条只读属性：`hostname` 从 href 里抠出主机名（会剥掉 userinfo 与端口、
+支持 IPv6 字面量），`pathname` 去掉开头那段 `//host`。
+
+**这样为什么不会误伤**：`http://a//b` 这种特殊 scheme 的双斜杠路径，其 `hostname` 非空，
+条件 1 直接不成立，`pathname` 一个字节都不动；`foo:/bar`（没有 `//`）条件 3 不成立；
+`data:text/plain,hello` 同理。
+
+### 差分测试（`tools/polyfill-test/url-authority-test.mjs`）
+
+本机 Node 的 `URL` 是**规范实现**，直接测只会得到「Node 本来就对」的假绿。
+所以测试**先把 `URL` 换成复刻该缺口的假体**，再装垫片：
+
+```
+--- A. 模拟 Chrome 114 旧内核（authority 不解析）+ 垫片 ---
+  ok   假体确实复刻了缺口：hostname 为空
+  ok   假体确实复刻了缺口：pathname 多出 //file
+  ok   假体下 dsh 的 protocolOf 判定为 undefined（即「文件资源服务不可用」）   ← 先复现故障
+  ok   垫片后 hostname 恢复为 file
+  ok   垫片后 pathname 恢复为 /session/…
+  ok   垫片后 dsh 的 protocolOf 判定为 file（修复生效）
+  ok   带端口的 authority 也被正确剥端口
+  ok   带 userinfo 的 authority 也被正确剥掉
+  ok   特殊 scheme 的双斜杠路径不被误伤：http://a//b 的 pathname 仍是 //b
+  ok   没有 //authority 的串不被误伤：foo:/bar 的 hostname 仍为空
+  ok   data: 之类不被误伤
+  ok   垫片幂等：再装一次结果不变
+--- B. 规范内核（Node 原生 URL）+ 垫片：必须零副作用 ---
+  ok   特性探测短路：根本没替换 hostname getter
+  ok   规范内核行为不受影响
+  ok   规范内核 protocolOf 本来就正确
+  --- URL authority 差分测试：通过 15 / 失败 0
+```
+
+已接入交付门禁。三套测试现在一起跑：`check.mjs`（120）+ `settle-test.mjs`（6）+ `url-authority-test.mjs`（15）。
+
+## 28. 1.3.9 装完后怎么确认修好了
+
+文件预览应当直接显示内容。日志里 `recs` 的读数应当从
+
+```json
+"proto":"UNDEFINED","st":"none","u":"dsh-resource:||78"
+```
+
+变成
+
+```json
+"proto":"file","st":"live","u":"dsh-resource:|file|72"
+```
+
+`st` 变 `live` 就是彻底通了。顺带，这个内核偏差还会影响 `sidebar-right` 里
+`pathOf()` 的标签类型匹配，以及 `plan` / `changes-review` 等其它 `dsh-resource://` 协议，
+所以这一版应当会一并改善。

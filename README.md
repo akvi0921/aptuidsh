@@ -17,6 +17,8 @@ APTUIDSH 不依赖 Termux、不依赖 root、不依赖任何外部环境。APK �
 
 > 端口特意选 **3081**，与本机 Termux 里跑在 3080 的 dsh 完全隔离，两者可同时运行。
 
+> 版本变化见 [`CHANGELOG.md`](./CHANGELOG.md)；许可见 [`LICENSE`](./LICENSE)（MIT）。
+
 ---
 
 ## 一、形态：原生侧只管环境，前端全用官方 Web UI
