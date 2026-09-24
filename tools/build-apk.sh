@@ -54,6 +54,14 @@ esac
 # 且**绝不能接管道/重定向**（那会让输出不再流经 stdout，进度条就采集不到）。
 echo "==> $GRADLE $TASK --console=rich"
 TERM=xterm-256color script -q -f -c "$GRADLE $TASK --console=rich" /dev/null
+GRADLE_RC=$?
+
+# 必须显式检查退出码：`script` 包装后不会自动中断，
+# 曾经出现 BUILD FAILED 却照样打印「构建完成」、把上一版 APK 当新版交付的事故。
+if [ "$GRADLE_RC" -ne 0 ]; then
+  echo "[!] 构建失败：$GRADLE $TASK 退出码 $GRADLE_RC（上面 BUILD FAILED 的报错才是真相）"
+  exit "$GRADLE_RC"
+fi
 
 APK="app/build/outputs/apk/$VARIANT/app-$VARIANT.apk"
 [ -f "$APK" ] || { echo "[!] 未找到产物 $APK"; exit 1; }
