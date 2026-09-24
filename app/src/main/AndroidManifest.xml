@@ -1,8 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- ===== APTUIDSH AndroidManifest:Compose UI + 纯 Java 协议层,无 XML 布局 =====
-     namespace/applicationId 由 app/build.gradle 声明为 com.aptuidsh.kui
+<!-- ===== APTUIDSH AndroidManifest =====
      本 APP 自带一整套 rootless Linux 运行环境(proroot + Ubuntu + Node + dsh),
-     后端由前台服务 DshService 在 127.0.0.1:3081 上守护运行。 -->
+     后端由前台服务 DshService 在 127.0.0.1:3081 上守护运行。
+
+     【2026-09-24 形态变更】自研原生前端(对话/会话列表/设置/文件浏览/播放器/协议层)
+     已整体移除,前端只保留**官方 Web UI**(WebUiActivity 内嵌 WebView)。
+     原生侧只剩三件容器:首屏环境控制台(MainActivity)、官方 Web UI、环境控制台;
+     协议层(包 com.aptuidsh.kui.net)与文件层(包 com.aptuidsh.kui.file)随之删除,
+     因此不再需要 REQUEST_INSTALL_PACKAGES(APK 直装)与文件伺服 Provider。 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!-- 网络访问:连接本机 dsh 后端 http://127.0.0.1:3081 -->
@@ -12,16 +17,16 @@
     <!-- 前台服务:挂住内置 dsh 后端进程不被系统回收 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
-    <!-- 安装/启动期间持有 PARTIAL_WAKE_LOCK:屏幕熄灭后 CPU 仍要跑完 585MB 解压 -->
+    <!-- 安装/启动期间持有 PARTIAL_WAKE_LOCK:屏幕熄灭后 CPU 仍要跑完约 200MB 镜像解压 -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- Android 13+ 通知权限(前台服务通知) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- 附件存储:写入 /storage/emulated/0/APTUIDSH/ 公共目录(Android 11+ 需"所有文件访问") -->
+    <!-- 工作区存储:guest 把 /storage/emulated/0 绑定为 /sdcard,工作区默认落在 /sdcard/APTUIDSH。
+         未授予「所有文件访问」时会优雅回退到 guest 内部的 /root/workspace
+         (见 ProrootEnv.defaultWorkspaceGuestPath),因此这里保留声明以便用户按需授权。 -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
-    <!-- 文件浏览/路径点击:APK 直装(PackageInstaller 会话,需"安装未知应用"用户授权) -->
-    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <application
         android:name=".AptuidshApp"
@@ -34,9 +39,8 @@
         android:extractNativeLibs="true"
         android:usesCleartextTraffic="true">
 
-        <!-- 主界面:launcher(首屏:内置环境控制 + 连接状态 + 后端信息)。
-             configChanges 声明旋转/宽度变化由代码重排(onConfigurationChanged),
-             避免重建 Activity 丢失网关/连接状态 -->
+        <!-- 首屏:launcher —— 内置环境控制台(装/启/停/重启/更新 + 进入官方 Web UI)。
+             configChanges 声明旋转/宽度变化由代码重排,避免重建 Activity 打断安装/启动流程 -->
         <activity
             android:name=".MainActivity"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
@@ -46,32 +50,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <!-- 对话主界面(正式页面):首屏横幅图点击进入;侧边栏收纳/展开 + 空状态对话区 -->
-        <activity
-            android:name=".ChatActivity"
-            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
-            android:exported="false" />
-        <!-- 内置文件浏览器(工作区/共享存储目录浏览;host.listDirectory) -->
-        <activity
-            android:name=".FileBrowserActivity"
-            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
-            android:exported="false" />
-        <!-- 内置文件查看器(文本/图片;供路径点击与文件浏览器调用) -->
-        <activity
-            android:name=".FileViewerActivity"
-            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
-            android:exported="false" />
-        <!-- 内置音/视频播放器(不依赖系统播放应用) -->
-        <activity
-            android:name=".PlayerActivity"
-            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
-            android:exported="false" />
-        <!-- 官方 Web UI(内嵌 WebView):直连内置后端,作为原生 UI 的备用/对照入口 -->
+
+        <!-- 唯一前端:官方 dsh Web UI(内嵌 WebView),直连内置后端 127.0.0.1:3081 -->
         <activity
             android:name=".WebUiActivity"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
             android:exported="false" />
-        <!-- 内置环境控制台:运行日志 / 后台进程 / 环境重装 -->
+
+        <!-- 内置环境控制台:运行日志 / 自检 / 环境重装 -->
         <activity
             android:name=".EnvConsoleActivity"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
@@ -83,19 +69,6 @@
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
-
-        <!-- 文件伺服 Provider:content://com.aptuidsh.kui.files/<绝对路径> → 只读流,
-             供系统应用(ACTION_VIEW)打开共享存储文件;授予临时读权限 -->
-        <provider
-            android:name=".file.FileServeProvider"
-            android:authorities="com.aptuidsh.kui.files"
-            android:exported="false"
-            android:grantUriPermissions="true" />
-
-        <!-- PackageInstaller 安装会话结果回调(Toast 回显) -->
-        <receiver
-            android:name=".InstallReceiver"
-            android:exported="false" />
     </application>
 
 </manifest>

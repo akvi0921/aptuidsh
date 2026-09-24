@@ -151,7 +151,13 @@ fun EnvConsoleScreen(onBack: () -> Unit) {
                 InfoLine("说明", status.message.ifEmpty { "—" })
                 InfoLine("后端", ProrootEnv.BASE_URL, mono = true)
                 InfoLine("端口", if (status.portAlive) "已监听" else "未监听")
-                InfoLine("dsh", com.aptuidsh.kui.net.ApiCompat.dshVersion())
+                // 协议层已移除：版本直接读环境事实，不再经由 ApiCompat
+                InfoLine(
+                    "dsh",
+                    runCatching { ProrootEnv.installedDshVersion(context) }.getOrNull()
+                        ?: runCatching { ProrootEnv.bundledDshVersion(context) }.getOrNull()
+                        ?: "—",
+                )
                 InfoLine("镜像", status.imageInfo?.replace("\n", " · ") ?: "—")
                 Spacer(Modifier.height(6.dp))
                 Text(

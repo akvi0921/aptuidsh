@@ -57,6 +57,12 @@ object WebPolyfill {
         append("<script data-aptuidsh=\"worker-bridge\">")
         append(GUARD)
         append("</script>")
+        append("<style data-aptuidsh=\"layout\">")
+        append(CSS)
+        append("</style>")
+        append("<script data-aptuidsh=\"layout-check\">")
+        append(LAYOUT_CHECK)
+        append("</script>")
     }
 
     /** 在 HTML 里尽早插入垫片；插不进去就前置到文档最前面。 */
@@ -125,6 +131,91 @@ object WebPolyfill {
     globalThis.Blob = BridgedBlob;
   } catch (e) {
     // 守卫失败只意味着「worker 里没有垫片」，绝不能影响页面本身
+  }
+})();
+"""
+
+    /**
+     * 窄屏布局覆盖层：把官方 Web UI 里**为桌面设计的左右布局改成上下布局**。
+     *
+     * <h3>为什么必须加 !important</h3>
+     * 官方界面是桌面优先的：设置弹窗固定 `width:800px`，里面左边一条 **188px 的竖排导航**，
+     * 右边才是内容；每条设置行又是 `display:flex; justify-content:space-between`。
+     * 在手机上（弹窗可用宽度只有 `100vw - 48px`）内容列被压到几十像素，
+     * 而中文的 min-content 就是「一个汉字」，于是标签被逐字换行竖排、控件被挤到最右 —— 
+     * 就是实测看到的「设置页变形」。
+     *
+     * <p>另外 dsh 的插件样式是**运行时** `document.head.appendChild` 注入的，
+     * 永远排在我们注入的 `<style>` 之后；同为单类选择器时后者胜出，
+     * 所以这里必须 `!important` 才能稳定覆盖。
+     *
+     * <h3>⚠ 与 dsh 版本的耦合</h3>
+     * 选择器用的是 dsh 的 CSS Module 类名（`class*=` 前缀匹配，抗哈希后缀变化）。
+     * **升级内置 dsh 后必须重新核对这几个前缀**；[LAYOUT_CHECK] 会在设置弹窗出现时
+     * 把「覆盖是否真的生效」写到 `window.__aptuidshSettingsLayout`，用于排查。
+     */
+    private const val CSS = """
+/* ---- 设置弹窗：左右 → 上下（导航在上，内容在下）---- */
+[class*="VOzbGW_panel"] {
+  flex-direction: column !important;
+}
+[class*="VOzbGW_nav"] {
+  flex-direction: row !important;
+  width: 100% !important;
+  align-items: center !important;
+  gap: 12px !important;
+  padding: 16px 12px 8px !important;
+  overflow: hidden !important;
+}
+[class*="VOzbGW_navTitle"] {
+  flex: none !important;
+  padding: 0 4px !important;
+}
+[class*="VOzbGW_navList"] {
+  flex-direction: row !important;
+  flex: 1 1 auto !important;
+  min-width: 0 !important;
+  gap: 4px !important;
+  overflow-x: auto !important;
+  overflow-y: hidden !important;
+}
+[class*="VOzbGW_navCell"] {
+  flex: none !important;
+  height: 36px !important;
+  white-space: nowrap !important;
+}
+
+/* ---- 设置行：窄屏下标题/说明在上、控件在下，避免左列被压成「一字一行」---- */
+@media (max-width: 560px) {
+  [class*="Pt1bsG_row"] {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 10px !important;
+  }
+}
+"""
+
+    /**
+     * 覆盖层自检：设置弹窗一出现就检查 `flex-direction` 是否真的变成 `column`，
+     * 结果写到 `window.__aptuidshSettingsLayout`（`applied` / `stale`），
+     * 便于 dsh 升级后快速判断「是不是类名变了导致覆盖失效」。
+     *
+     * <p>只观察到第一次命中就断开，不在热路径上常驻。
+     */
+    private const val LAYOUT_CHECK = """
+(function () {
+  try {
+    if (typeof MutationObserver === 'undefined' || typeof document === 'undefined') { return; }
+    var obs = new MutationObserver(function () {
+      var panel = document.querySelector('[class*="VOzbGW_panel"]');
+      if (!panel) { return; }
+      var dir = getComputedStyle(panel).flexDirection;
+      window.__aptuidshSettingsLayout = (dir === 'column') ? 'applied' : 'stale';
+      obs.disconnect();
+    });
+    obs.observe(document.documentElement, { childList: true, subtree: true });
+  } catch (e) {
+    // 自检失败不影响任何功能
   }
 })();
 """

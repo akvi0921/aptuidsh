@@ -6,7 +6,6 @@ import com.aptuidsh.kui.env.DshAuth
 import com.aptuidsh.kui.env.DshBackend
 import com.aptuidsh.kui.env.DshService
 import com.aptuidsh.kui.env.ProrootEnv
-import com.aptuidsh.kui.net.ApiCompat
 import java.io.File
 
 /**
@@ -15,8 +14,7 @@ import java.io.File
  * <p>进程启动时做三件与环境相关的事：
  * <ol>
  *   <li>初始化 [DshAuth]（恢复上次的 launchToken / Cookie，避免每次冷启都重新交换）；</li>
- *   <li>从内置镜像的版本标记文件里读出 dsh 版本号，注入 [ApiCompat]（`host.describe`
- *       在新版 API 里已被移除，版本号由本地补齐）；</li>
+ *   <li>（自研协议层已随原生前端一并移除，本类不再向后端注入任何版本号；</li>
  *   <li>环境已装好时静默拉起前台服务，让内置 dsh 后端跟着 APP 一起起来。</li>
  * </ol>
  */
@@ -28,7 +26,6 @@ class AptuidshApp : Application() {
         com.aptuidsh.kui.env.EnvLog.attach(this)
         com.aptuidsh.kui.env.EnvLog.i("APP 启动（pid=${android.os.Process.myPid()}）")
         DshAuth.init(this)
-        ApiCompat.setDshVersion(readDshVersion())
         syncGuestResolvConf()
         maybeAutoStartBackend()
         // 后台线程写一份「用户可直接发送」的诊断报告：
@@ -106,29 +103,6 @@ class AptuidshApp : Application() {
             "?"
         }
 
-    /**
-     * 内置 dsh 版本：
-     *  1) 已安装 → 读设备上那份 rootfs 的 `.aptuidsh-image`（**真在跑的那份**）；
-     *  2) 还没装、或装的是被 APK 淘汰的旧镜像 → 退回 APK 内置镜像的版本标记
-     *     （`assets/image-version.txt`，由 tools/build-rootfs.sh 一并产出）。
-     *
-     * <p>注意**不要写死版本号**：这里原先的兜底是字面量 `"0.1.5+"`，升级后它照样显示旧版本，
-     * 直接造成「到底升级没有」这个疑问。
-     */
-    private fun readDshVersion(): String =
-        ProrootEnv.installedDshVersion(this)
-            ?: ProrootEnv.bundledDshVersion(this)
-            ?: "未知"
-
-    /** guest 有自己的 /etc，DNS 必须由宿主按当前网络写入。 */
-    private fun syncGuestResolvConf() {
-        if (!ProrootEnv.isInstalled(this)) return
-        try {
-            ProrootEnv.syncResolvConf(this)
-        } catch (t: Throwable) {
-            Log.w(TAG, "sync resolv.conf failed: $t")
-        }
-    }
 
     /**
      * 自动引导：环境已装好就拉起后端；**未装则直接开始安装**。
