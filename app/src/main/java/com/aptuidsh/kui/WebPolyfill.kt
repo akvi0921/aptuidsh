@@ -66,6 +66,9 @@ object WebPolyfill {
         append("<script data-aptuidsh=\"error-capture\">")
         append(ERROR_CAPTURE)
         append("</script>")
+        append("<script data-aptuidsh=\"resource-probe\">")
+        append(RESOURCE_PROBE)
+        append("</script>")
     }
 
     /** 在 HTML 里尽早插入垫片；插不进去就前置到文档最前面。 */
@@ -309,6 +312,140 @@ object WebPolyfill {
         return orig.apply(console, arguments);
       };
     });
+  } catch (e) { /* 诊断脚本绝不能影响页面 */ }
+})();
+"""
+
+    /**
+     * 「文件资源服务不可用」的取证脚本。
+     *
+     * 这条报错来自 `dsh-client-ui-sidebar-documentpreview`，触发条件是
+     * `meta.status === "none"`，而 `status` 在 `dsh-client-resources` 里只有一种来源：
+     * `providerOf(protocolOf(address)) === undefined`。也就是说只有两种可能：
+     *   (a) `dsh-resource://file/…` 这个 provider 根本没注册 —— 于是 `file` 协议的
+     *       `ctx.resources.register()` 从未发生（它的 `inject` 要求
+     *       `resources` / `remote` / `remote.workspaceFiles` 三个服务齐全，
+     *       少一个 cordis 就不会 apply，只会打一条 warn）；
+     *   (b) `tab.contentId` 不是合法地址（`protocolOf` 返回 undefined）。
+     *
+     * 本脚本必须在 dsh 的 loader 队列脚本**之前**执行（inject 插在 `<head>` 之后第一个），
+     * 用 setter 陷阱接住 `window.__ModuleLoader__`，从而能记录：哪些插件 bundle 真的
+     * load 了、目标插件的 `apply` 有没有跑、跑的时候有没有抛。再定期把页面上出现的
+     * `dsh-resource://` 地址与预览面板状态一起塞进 `__aptuidshErrors`，
+     * 由 WebUiActivity 的 errorPoller 转写到环境控制台日志。
+     *
+     * 全程 try/catch，绝不影响页面本身。
+     */
+    private const val RESOURCE_PROBE = """
+(function () {
+  try {
+    var g = window;
+    if (g.__aptuidshProbe) { return; }
+    var state = g.__aptuidshProbe = { modules: [], target: [] };
+    var WANT = ['dsh-client-resources', 'dsh-api-remotes', 'dsh-api-workspace-files'];
+    function short(id) { return String(id).replace('@deepseek-ai/', ''); }
+    function wanted(id) {
+      for (var i = 0; i < WANT.length; i++) { if (String(id).indexOf(WANT[i]) >= 0) { return true; } }
+      return false;
+    }
+    function note(line) {
+      try { (g.__aptuidshErrors || (g.__aptuidshErrors = [])).push('[probe] ' + line); } catch (e) { /* ignore */ }
+    }
+    var held;
+    function hook(loader) {
+      if (!loader || loader.__aptuidshHooked || typeof loader.load !== 'function') { return; }
+      loader.__aptuidshHooked = true;
+      var origLoad = loader.load;
+      loader.load = function (registration) {
+        try {
+          if (registration && typeof registration.id === 'string') {
+            var id = short(registration.id);
+            state.modules.push(id);
+            if (wanted(id) && typeof registration.factory === 'function') {
+              var factory = registration.factory;
+              registration = {
+                id: registration.id,
+                factory: function (require) {
+                  var face;
+                  try { face = factory(require); }
+                  catch (e) {
+                    state.target.push('factory-failed ' + id + ': ' + ((e && e.message) || e));
+                    throw e;
+                  }
+                  try {
+                    if (face && typeof face.apply === 'function' && !face.__aptuidshWrapped) {
+                      var origApply = face.apply;
+                      face.apply = function (ctx) {
+                        var out;
+                        try { out = origApply.call(this, ctx); }
+                        catch (e) {
+                          state.target.push('apply-failed ' + id + ': ' + ((e && e.message) || e));
+                          throw e;
+                        }
+                        state.target.push('apply-ok ' + id);
+                        return out;
+                      };
+                      face.__aptuidshWrapped = true;
+                    }
+                  } catch (e) { /* ignore */ }
+                  return face;
+                }
+              };
+            }
+          }
+        } catch (e) { /* ignore */ }
+        return origLoad.call(this, registration);
+      };
+    }
+    try {
+      Object.defineProperty(g, '__ModuleLoader__', {
+        configurable: true,
+        get: function () { return held; },
+        set: function (v) { held = v; try { hook(v); } catch (e) { /* ignore */ } }
+      });
+    } catch (e) { /* ignore */ }
+    try { if (Object.getOwnPropertyDescriptor(g, '__ModuleLoader__') && g.__ModuleLoader__) { hook(g.__ModuleLoader__); } } catch (e) { /* ignore */ }
+
+    function addresses() {
+      var found = [], seen = {};
+      try {
+        var html = String(document.body && document.body.innerHTML || '');
+        var m = html.match(/dsh-resource:\/\/[^"'\s<>\\)]{0,180}/g) || [];
+        for (var i = 0; i < m.length && found.length < 6; i++) {
+          var a = m[i];
+          if (seen[a] !== true) { seen[a] = true; found.push(a); }
+        }
+      } catch (e) { /* ignore */ }
+      return found;
+    }
+    function dump(tag) {
+      try {
+        var out = {
+          tag: tag,
+          modules: state.modules.length,
+          res: state.modules.indexOf('dsh-client-resources') >= 0,
+          rem: state.modules.indexOf('dsh-api-remotes') >= 0,
+          wsf: state.modules.indexOf('dsh-api-workspace-files') >= 0,
+          target: state.target.slice(-12),
+          body: document.querySelectorAll('[data-textpreview-body]').length,
+          stateNode: document.querySelectorAll('[data-textpreview-state]').length,
+          unsupported: document.querySelectorAll('[data-textpreview-unsupported]').length,
+          addr: addresses()
+        };
+        note(JSON.stringify(out));
+      } catch (e) { note('dump-failed ' + ((e && e.message) || e)); }
+    }
+    function start() {
+      var n = 0;
+      dump('t0');
+      var timer = setInterval(function () {
+        n += 1;
+        dump('t' + n);
+        if (n >= 8) { clearInterval(timer); }
+      }, 8000);
+    }
+    if (document.readyState === 'complete') { setTimeout(start, 4000); }
+    else { g.addEventListener('load', function () { setTimeout(start, 4000); }); }
   } catch (e) { /* 诊断脚本绝不能影响页面 */ }
 })();
 """
