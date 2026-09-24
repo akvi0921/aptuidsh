@@ -46,12 +46,29 @@ function extract(kotlinName) {
 }
 const JS = extract('JS');
 const GUARD = extract('GUARD');
+const PROBE = extract('RESOURCE_PROBE');
 
-console.log(`抽出垫片源码 ${JS.length} 字符 / 守卫 ${GUARD.length} 字符`);
+console.log(`抽出垫片源码 ${JS.length} 字符 / 守卫 ${GUARD.length} 字符 / 取证探针 ${PROBE.length} 字符`);
 // Kotlin 原样字符串里出现美元符号会变成模板起始符、直接编译不过；这里提前守一道
 ok('垫片源码里没有美元符号（Kotlin 原样字符串的模板起始符）',
-  !JS.includes('$') && !GUARD.includes('$'),
-  `JS 有 ${(JS.match(/\$/g) || []).length} 个，GUARD 有 ${(GUARD.match(/\$/g) || []).length} 个`);
+  !JS.includes('$') && !GUARD.includes('$') && !PROBE.includes('$'),
+  `JS 有 ${(JS.match(/\$/g) || []).length} 个，GUARD 有 ${(GUARD.match(/\$/g) || []).length} 个，`
+  + `探针有 ${(PROBE.match(/\$/g) || []).length} 个`);
+// 取证探针是独立注入的第二个脚本：必须是合法 JS，且不能依赖任何 dsh 内部全局
+// （它要抢在 loader 队列脚本之前跑，那时页面里除了 window/document 什么都没有）。
+// 取证探针是独立注入的第二个脚本：必须是合法 JS，且在 Node 里解析不报错。
+ok('取证探针语法可解析', (() => {
+  try { new Function(PROBE); return true; } catch { return false; }
+})(), 'new Function(PROBE) 抛了');
+ok('探针覆盖「活体注册模式会原地替换 load」这个真机坑',
+  PROBE.includes('wrapLoad()') && PROBE.includes('origCreate.call'),
+  '1.3.4 真机教训：只接一次 load 会数到 modules=1，必须在 create() 之后再接一次');
+ok('探针直接读注册表（providers/records），不再靠计数推断',
+  PROBE.includes('r.providers') && PROBE.includes('r.records'),
+  '找不到 r.providers / r.records');
+ok('探针给 $mount 加了「一损俱损」缓解（用字符码拼方法名，Kotlin 原样字符串不能写美元+字母）',
+  PROBE.includes("String.fromCharCode(36) + 'mount'") && PROBE.includes('mount-failed'),
+  '找不到 String.fromCharCode(36) + \'mount\' / mount-failed');
 ok('垫片源码非空且看起来是 JS', JS.includes('Math.sumPrecise') && JS.includes('Iterator'));
 
 // -------------------------------------------- 先抓原生实现的行为做基准

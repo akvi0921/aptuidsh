@@ -363,22 +363,26 @@ object WebPolyfill {
     /**
      * 【实验性缓解 + 取证】让「22 个命名空间一起挂载」不再一损俱损。
      *
-     * `dsh-api-remotes.apply` 是 `for (…) disposers.push(await ctx.remote.$mount(c))`，
-     * 外面套一层 `try { … } catch { 逐个 dispose(); throw error; }` —— 也就是说
-     * **任意一个**命名空间挂载失败，其余已经装好的（含 `remote.workspaceFiles`）
+     * `dsh-api-remotes.apply` 是 `for (…) disposers.push(await ctx.remote.MOUNT(c))`（dsh 里那个
+     * 方法名带美元前缀），外面套一层 `try { … } catch { 逐个 dispose(); throw error; }` ——
+     * 也就是说**任意一个**命名空间挂载失败，其余已经装好的（含 `remote.workspaceFiles`）
      * 会被全部回滚。而 `remote.workspaceFiles` 一旦消失，`dsh-api-workspace-files`
      * 就不会 apply，`file` 协议的 provider 就不会注册，预览就报「文件资源服务不可用」。
      *
-     * 这里把 `$mount` 包成「失败也返回一个空 disposer」，于是其余命名空间照常装上；
+     * 这里把那个挂载方法包成「失败也返回一个空 disposer」，于是其余命名空间照常装上；
      * 同时把失败的贡献包名记进 `target`，一举拿到根因。
+     *
+     * 方法名用字符码拼出来：Kotlin 原样字符串里写「美元 + 字母」会被当成模板起始符，
+     * 直接编译不过（`tools/polyfill-test` 有专门一道断言守这个坑）。
      */
+    var MOUNT = String.fromCharCode(36) + 'mount';
     function patchMount(ctx) {
       try {
         if (typeof ctx.get !== 'function') { return; }
         var remote = ctx.get('remote');
-        if (!remote || typeof remote.$mount !== 'function' || remote.__aptuidshMountPatched) { return; }
-        var origMount = remote.$mount;
-        remote.$mount = function (contribution) {
+        if (!remote || typeof remote[MOUNT] !== 'function' || remote.__aptuidshMountPatched) { return; }
+        var origMount = remote[MOUNT];
+        remote[MOUNT] = function (contribution) {
           var pkg = (contribution && contribution.package) || '?';
           var p;
           try { p = origMount.call(this, contribution); }
@@ -393,7 +397,8 @@ object WebPolyfill {
       } catch (e) { /* ignore */ }
     }
     /** 包住目标插件的 apply，顺便把它的 cordis ctx 偷出来 —— 这是全场最关键的证据来源。 */
-    function wrapFace(id, face) {      try {
+    function wrapFace(id, face) {
+      try {
         if (!face || typeof face.apply !== 'function' || face.__aptuidshWrapped) { return face; }
         var origApply = face.apply;
         face.apply = function (ctx) {
