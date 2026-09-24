@@ -7,12 +7,12 @@ APTUIDSH 不依赖 Termux、不依赖 root、不依赖任何外部环境。APK �
 | 层 | 内容 | 体积 |
 |---|---|---|
 | 运行环境 | **proroot**（rootless Linux runtime，5 个 `.so`） | ~0.7 MB |
-| 操作系统 | **Ubuntu 24.04.5 LTS arm64** base rootfs（glibc） | ~78 MB（xz 压缩后） |
+| 操作系统 | **Ubuntu 24.04.5 LTS arm64** base rootfs（glibc） | ~117 MB（xz 压缩后） |
 | 运行时 | **Node.js 22.22.2** linux-arm64（装在 `/usr/local`） | — |
-| 本体 | **@deepseek-ai/dsh 0.1.5-rc.1**（npm 全局安装，含全部插件） | — |
+| 本体 | **@deepseek-ai/dsh 0.1.7-rc.1**（npm 全局安装，含全部插件） | — |
 | 前端 | 原生 Compose 界面（继承自 dsh-aui）+ 内嵌官方 Web UI | — |
 
-安装后首次启动，APP 把内置镜像解压到私有目录（约 585 MB、32500 个文件，实测 **10 秒**），
+安装后首次启动，APP 把内置镜像解压到私有目录（约 794 MB，实测 **10 秒**量级），
 然后在 `127.0.0.1:3081` 上拉起 `dsh web`，全程离线可用。
 
 > 端口特意选 **3081**，与本机 Termux 里跑在 3080 的 dsh 完全隔离，两者可同时运行。
@@ -37,7 +37,7 @@ dsh 可以直接读写手机里的文件。
 aptuidsh/
 ├── app/src/main/
 │   ├── AndroidManifest.xml
-│   ├── assets/rootfs.tar.xz          # 内置 Linux 环境镜像（由 tools/build-rootfs.sh 生成）
+│   ├── assets/rootfs.img             # 内置 Linux 环境镜像（由 tools/build-rootfs.sh 生成）
 │   ├── jniLibs/arm64-v8a/libproroot*.so
 │   └── java/com/aptuidsh/kui/
 │       ├── AptuidshApp.kt            # Application：鉴权初始化 / DNS 同步 / 自动拉起后端
@@ -66,11 +66,11 @@ aptuidsh/
 
 ## 三、镜像与二进制如何重建
 
-`assets/rootfs.tar.xz`（78 MB）与 `jniLibs/*.so` **不入 Git**，由脚本生成：
+`assets/rootfs.img`（约 117 MB）与 `jniLibs/*.so` **不入 Git**，由脚本生成：
 
 ```bash
-bash tools/build-rootfs.sh ~/aptuidsh-rootfs 0.1.5-rc.1
-cp ~/aptuidsh-rootfs/dist/rootfs.tar.xz app/src/main/assets/rootfs.tar.xz
+bash tools/build-rootfs.sh ~/aptuidsh-rootfs 0.1.7-rc.1
+cp ~/aptuidsh-rootfs/dist/rootfs.img app/src/main/assets/rootfs.img
 cp ~/aptuidsh-rootfs/proroot/*.so app/src/main/jniLibs/arm64-v8a/
 ```
 
@@ -97,7 +97,7 @@ cp ~/aptuidsh-rootfs/proroot/*.so app/src/main/jniLibs/arm64-v8a/
 rootfs/
 ├── bin, lib, sbin, usr/...                  Ubuntu 24.04.5 LTS arm64 base
 ├── usr/local/bin/{node,npm,npx,dsh}         Node 22.22.2（在默认 PATH 内）
-├── usr/local/lib/node_modules/@deepseek-ai/dsh    dsh 0.1.5-rc.1 本体 + 全部依赖
+├── usr/local/lib/node_modules/@deepseek-ai/dsh    dsh 0.1.7-rc.1 本体 + 全部依赖
 ├── root/.dsh/profiles/...                   预热好的 dsh profile（首启无需联网拉插件）
 ├── root/workspace                           默认工作区（/sdcard 不可用时回退）
 ├── etc/resolv.conf                          DNS 兜底（APP 每次启动用当前网络覆写）
@@ -128,7 +128,7 @@ APP 进程
 内置的是 dsh **最新版**，而原生界面继承自面向 dsh **0.1.1** 的 dsh-aui，
 契约发生破坏性变更，统一由 `net/ApiCompat.java` 与 `env/DshAuth.java` 收敛：
 
-| 变更 | 0.1.1（前端原始目标） | 0.1.5（内置版本） | 处理位置 |
+| 变更 | 0.1.1（前端原始目标） | 0.1.7（内置版本） | 处理位置 |
 |---|---|---|---|
 | 鉴权 | 无 | 必须携带签名 Cookie（launchToken -> `GET /?token=` -> `Set-Cookie`） | `DshAuth` |
 | 载荷信封 | payload 平铺 | 必须 `payload:{args:{...}}`，键名 = 描述符形参名 | `ApiCompat.buildArgs` |
@@ -136,11 +136,31 @@ APP 进程
 | | `session.history` | `session/page` | 同上 |
 | | `agentPreset.*` / `goal.*` | `agentPresets/*` / `goals/*` | 同上 |
 | | `host.describe` | **已删除** | `DshClient.syntheticHostDescribe()` 本地合成 |
+| | `subagents/list`（`subagent.list` / `subagent.history`） | **已删除**（0.1.7 起） | 改走 `session/list` 的 `projections.values.subagentCatalog`，由 `ApiCompat.adaptResult` 还原旧形状 |
 | 实时流 | `/api/events.mux` | `/api/remote.mux` 单一 WS 多路复用 + `session/follow` 逻辑流 | `EventStream` |
 
 `ApiCompat` 里"新方法名的形参名"全部取自 dsh 自带的 typert 描述符
 （`@deepseek-ai/dsh-client-connection/lib/client.js` 的分发器），不是猜的；
 升级 dsh 版本后应重新核对这张表。
+
+### 六·二、官方 Web UI 在低版本 WebView 上的兼容垫片（重要）
+
+本机机型系统 WebView 实测只有 **Chrome 114**，而官方 Web UI 按现代浏览器构建；
+缺 API 会让客户端模块**导入即抛异常**，整页报 `Failed to load plugins`。
+
+`WebPolyfill.kt` 负责注入纯 JS 垫片（补标准库 API 比换内核代价小得多，
+Android 也不允许应用自带 Chromium）。`WebUiActivity` 用 `shouldInterceptRequest`
+拦下根文档、**手动跟完重定向**（`/?token=` 会 303 下发 Cookie，而 WebView 跟随后的那次请求
+不再经过拦截器），再把垫片插到 `<head>` 之后——外壳入口是 `type="module"`（默认 defer），
+所以内联经典脚本一定先执行。
+
+除页面作用域外还有一层 **worker 注入守卫**：pdf.js 的 worker 是
+`new Worker(URL.createObjectURL(new Blob([源码], {type:"text/javascript"})))` 造出来的
+**独立全局作用域**，页面垫片到不了它（它在 worker 里用了 16 处 `Math.sumPrecise`）。
+守卫只在「type 是 JS 且 parts 全是字符串」时把垫片源码前置进那段 blob，其余 Blob 原样放行。
+
+改动垫片后请跑 `bash tools/polyfill-test/run.sh`；完整结论见
+`docs/升级dsh-0.1.7-rc.1与WebView垫片二轮.md`。
 
 ---
 
@@ -163,7 +183,7 @@ export JAVA_HOME=$PREFIX
 - 需要 **Android 8.0+**（proroot 要求 API 26+）。
 - dsh 自 0.1.5 起引入浏览器鉴权，原生客户端依赖 `launchToken`；
   若 dsh 进程不是由本 APP 拉起（例如手动在 guest 里启动），Cookie 需要重新交换一次。
-- rootfs 解压后占用约 585 MB，安装前请确认存储空间。
+- rootfs 解压后占用约 794 MB，安装前请确认存储空间。
 
 ---
 
@@ -202,7 +222,7 @@ bash tools/jvmtest/run.sh          # 需要本机 3081 上有 dsh 在跑
 
 它直接编译运行 APP 里**真实的** `net/ApiCompat.java` 与 `net/MuxClient.java`
 （只对 `android.util.Base64` 与 `DshAuth` 打桩），把生成的请求逐个打到真实后端，
-当前 23 项全部通过。
+当前 **28 项全部通过**（含 5 条 `adaptResult` 形状还原断言）。
 
 **为什么必须有它**：dsh 0.1.5 的网关对 `args` 的**形参名**校验极严，写错一个键名
 就会让某个功能静默失效——而这在真机上很难定位。这个测试台首次运行就抓出 5 个真实缺陷，
@@ -210,4 +230,16 @@ bash tools/jvmtest/run.sh          # 需要本机 3081 上有 dsh 在跑
 （`java.net.URL` 没有 ws 协议处理器）。完整缺陷表见
 `docs/协议适配勘误-dsh-0.1.5.md` 第九节。
 
-升级 dsh 版本后，第一件事就是跑它。
+升级 dsh 版本后，第一件事就是跑它。**本次升级就是靠它抓到了 `subagents/list` 被删除导致的 404 回归。**
+
+### 十·二、改了 WebView 兼容垫片一定要跑的工具
+
+```bash
+bash tools/polyfill-test/run.sh      # 不需要后端，秒级
+```
+
+它从 `WebPolyfill.kt` 抽出**真实垫片源码**，在 Node 里删掉 27 个「Chrome > 114」的 API 模拟
+低版本内核，装上垫片后逐条断言，并**与 Node 自带的原生实现做差分对拍**（对拍比手写期望值可靠：
+`RegExp.escape` 的转义规则就是这么被抓出来重写的）。当前 **89 项全部通过**。
+
+> 垫片的完整思路、本次逐包扫描的方法与结论，见 `docs/升级dsh-0.1.7-rc.1与WebView垫片二轮.md`。
