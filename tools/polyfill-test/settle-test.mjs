@@ -18,7 +18,8 @@ const PENDING = 0, LOADING = 1, ACTIVE = 2, FAILED = 3;
 globalThis.window = { addEventListener() {} };
 globalThis.document = { readyState: 'loading' };
 
-new Function(process.env.SETTLE_SRC)();
+import { extract } from './extract.mjs';
+new Function(extract('BOOT_SETTLE'))();
 
 const api = window.__aptuidshBootSettle;
 if (!api || typeof api.settle !== 'function' || typeof api.counts !== 'function') {

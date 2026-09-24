@@ -143,11 +143,11 @@ APP 进程
 
 ---
 
-## 六、官方 Web UI 在低版本 WebView 上的两道适配
+## 六、官方 Web UI 在低版本 WebView 上的适配
 
-本机机型系统 WebView 实测只有 **Chrome 114**，而官方 Web UI 按现代浏览器构建。
-`WebPolyfill.kt` 负责两件事，都由 `WebUiActivity` 用 `shouldInterceptRequest`
-拦下根文档、插到 `<head>` 之后（外壳入口是 `type="module"`，默认 defer，所以内联经典脚本一定先执行；
+本机机型系统 WebView 实测只有 **Chrome 114**（`Chrome/114.0.5735.196`），而官方 Web UI 按现代浏览器构建。
+`WebPolyfill.kt` 负责下面四件事，全部由 `WebUiActivity` 用 `shouldInterceptRequest` 拦下根文档、
+插到 `<head>` 之后（外壳入口是 `type="module"`，默认 defer，所以内联经典脚本必然先执行；
 且必须**手动跟完重定向**——`/?token=` 会 303 下发 Cookie，而 WebView 跟随后的那次请求不再经过拦截器）。
 
 ### 6.1 JS 兼容垫片
@@ -156,12 +156,58 @@ APP 进程
 （典型表现是整页 `Failed to load plugins … Iterator is not defined`）。
 全部按「存在则跳过」补齐，新内核上零副作用。
 
+| 缺口 | 版本 | 影响 |
+|---|---|---|
+| `Iterator` helpers（含 `join`/`concat`/`from`） | 122 | pdf.js 的特性检测直接抛 `ReferenceError`，整页插件加载失败 |
+| `Promise.try` / `withResolvers` | 128 / 119 | 多个客户端插件一 apply 就炸 |
+| `Set` 的 7 个集合运算、`Object/Map.groupBy`、`Array.fromAsync` | 122~124 | — |
+| `RegExp.escape` | 136 | — |
+| `Uint8Array` 的 base64/hex 六个方法、`Response/Blob/Request.bytes()` | 132~144 | PDF 预览链路 |
+| `Math.sumPrecise` | 147 | pdf.js 内嵌 worker |
+| `AbortSignal.any/timeout`、`Symbol.dispose/asyncDispose`、`URL.parse` | 116~126 | — |
+
 除页面作用域外还有一层 **worker 注入守卫**：pdf.js 的 worker 是独立全局作用域
 （由 `new Worker(URL.createObjectURL(new Blob([源码])))` 创建），页面垫片到不了它，
 而它在 worker 里用了 16 处 `Math.sumPrecise`。守卫只在「type 是 JS 且 parts 全是字符串」时
 把垫片源码前置进那段 blob，其余 Blob 原样放行。
 
-### 6.2 窄屏布局覆盖层（设置页 左右 → 上下）
+### 6.2 `URL` 的非特殊 scheme authority（**这是「文件打不开」的根因**）
+
+真机实测：这个 WebView **不解析非特殊 scheme 的 authority**。
+
+| `new URL('dsh-resource://file/session/sid/a.js')` | `protocol` | `hostname` | `pathname` |
+|---|---|---|---|
+| 规范实现（Node / 新内核） | `dsh-resource:` | `file` | `/session/sid/a.js`（72 字符）|
+| **真机 Chrome 114 WebView** | `dsh-resource:` | **（空）** | **`//file/session/sid/a.js`（78 字符）** |
+
+多出来的 6 个字符正好是 `//file` —— 整段 `//host` 被当成了路径。
+而 dsh 的资源模型靠 hostname 判断地址归哪个 provider 管：
+
+```js
+// dsh-client-resources
+function protocolOf(address) {
+  parsed = new URL(address);
+  if (parsed.protocol !== 'dsh-resource:') return void 0;
+  return parsed.hostname === '' ? void 0 : parsed.hostname.toLowerCase();   // ← 这里返回 undefined
+}
+```
+
+于是 `providerOf(undefined)` 恒为 `undefined`，记录的 status **永久**是 `none`，
+预览就一直显示「文件资源服务不可用」；更麻烦的是 provider 注册时那句补救
+`recordsOf(protocol).attach(record)` 也永远匹配不到它（该记录自己的 `protocol` 同样是 `undefined`）。
+
+修法是给 `URL.prototype` 的 `hostname` / `pathname` 打补丁，但**先特性探测**：
+
+```js
+var compliant = new U('dsh-probe://host/path').hostname === 'host';
+if (compliant) { return; }        // 内核正确，一个字都不改
+```
+
+只在三个条件同时成立时才动手（原生 `hostname` 为空、原生 `pathname` 以 `//` 开头、
+串里确实写了 `scheme://authority`），因此 `http://a//b` 这种特殊 scheme 的双斜杠路径、
+`foo:/bar`、`data:` 都不会被误伤。
+
+### 6.3 窄屏布局覆盖层（设置页 左右 → 上下）
 
 官方设置弹窗是**桌面双栏**设计（固定 `width:800px`，左侧一条 **188px 竖排导航**），
 在手机上内容列被压到几十像素；中文的 `min-content` 就是一个汉字，于是标签被逐字换行竖排。
@@ -169,12 +215,50 @@ APP 进程
 
 **注意**：dsh 的插件样式是运行时 `appendChild` 到 `<head>` 末尾的，永远排在我们的 `<style>` 之后，
 所以覆盖层的布局属性**必须带 `!important`**；选择器用 dsh 的 CSS Module 类名前缀
-（`[class*="VOzbGW_panel"]` 等），**升级 dsh 后需重新核对前缀**（方法见
+（`[class~="VOzbGW_panel"]` 等），**升级 dsh 后需重新核对前缀**（方法见
 `docs/只留官方WebUI与首页重做-1.3.0.md` §1.4）。
+
+### 6.4 启动竞态：让 `loader.await()` 等到插件名单收敛
+
+这是本仓库**唯一一处有意改变 dsh 行为**的补丁，因为它不补就必然踩到。
+dsh 的 web boot 内核是这样的：
+
+```js
+await entries.start(loader, manifest);   // 内部 await loader.await()
+await loader.await();                    // 只等「模块加载完成」
+nE(ctx, modules);                        // 一次性、无重试：任一 entry 不是 active 就 throw
+```
+
+而 `remote.*` 这些命名空间，要等 `dsh-api-remotes.apply` 里**串行**的 22 次
+`await ctx.remote.$mount(contribution)` 跑完才会出现。于是「模块都下好了」与
+「服务全部就位」之间存在一个窗口；内核恰好在窗口里做全量检查，一旦不通过就抛错，
+页面**永久**停在 `Failed to load plugins`。旧内核上这个窗口更大，所以是必现的
+（这也是「文件打不开」的同一个根因：roster 没激活完时预览拿不到 provider）。
+
+修法：拿到一个插件的 cordis `ctx` 后，把 `loader.await()` 包成「原有语义 + 等插件名单收敛」。
+收敛判据是 `loader.entries()` 里 `fiber.state` 不再是 `PENDING/LOADING`（`2=ACTIVE`、`3=FAILED` 都不再等）。
+
+**有界、可退让**：3 秒无进展或 20 秒总时长即放手，让 dsh 原本的检查照旧执行 ——
+它只负责「别检查得太早」，绝不把失败伪装成成功。实测正常收敛只要 **58~231 ms**，
+对启动几乎没有额外开销。
+
+为此需要拿到 `ctx`，办法是给 `@deepseek-ai/dsh-client-resources` 这一个插件的 `factory`
+包一层（它的 `inject` 只有 `slots`，是最早 apply 的插件之一）。两个必须注意的点：
+
+- `window.__ModuleLoader__` 自始至终是**同一个对象**，但 dsh 的 `create()` 会把队列模式的
+  `load` **原地替换**成「活体注册模式」的 `load` —— 所以只能挂访问器自动接住替换后的版本，
+  接一次会接空；
+- 注册对象只**就地**改 `factory`，绝不新建/替换它（同一性必须保住）。
 
 ---
 
 ## 七、构建
+
+```bash
+bash tools/build-apk.sh debug        # 推荐：内含 pty 包装（见下），并会检查 gradle 退出码
+```
+
+它等价于：
 
 ```bash
 export PATH=~/gradle-8.13/bin:$PATH
@@ -183,7 +267,7 @@ export JAVA_HOME=$PREFIX
 TERM=xterm-256color script -q -f -c "gradle :app:assembleDebug --console=rich" /dev/null
 ```
 
-产物约 **212 MB**（其中 203 MB 是 rootfs 镜像）。`gradle.properties` 里那条
+产物约 **211 MB**（其中约 203 MB 是 rootfs 镜像）。`gradle.properties` 里那条
 `android.aapt2FromMavenOverride` 是 Termux/arm64 环境必需的（AGP 自带的 aapt2 是 x86_64）。
 
 > 交付用的是 **debug APK**（沿用 debug 证书，可覆盖安装）。看构建进度必须走
@@ -230,20 +314,28 @@ TERM=xterm-256color script -q -f -c "gradle :app:assembleDebug --console=rich" /
 
 ---
 
-## 十、改了 WebView 垫片一定要跑的工具
+## 十、改了 WebView 兼容层一定要跑的门禁
 
 ```bash
-bash tools/polyfill-test/run.sh      # 不需要后端，秒级
+bash tools/polyfill-test/run.sh      # 不需要后端、不需要设备，秒级
 ```
 
-它从 `WebPolyfill.kt` 抽出**真实垫片源码**（单一真源，不手抄到测试里），然后：
+三套测试都从 `WebPolyfill.kt` **抽真实源码**再执行（单一真源，绝不手抄一份到测试里）：
 
-- **A/B 组**：在 Node 里删掉 27 个「Chrome > 114」的 API 模拟低版本内核，装上垫片逐条断言
-  存在性与语义；再验证幂等、以及「原生已存在时不覆盖」；
-- **C 组 差分对拍**：本机 Node 自带这批新 API，先记下原生结果再比对
-  （`RegExp.escape` 675 样本 / base64+hex 各 162 / `URL.parse` 675）
-  ——**能用原生对拍就别手写期望值**：`RegExp.escape` 的转义规则就是被它抓出来重写的；
-- **D 组**：钉住窄屏布局覆盖层（选择器齐全、布局属性全部带 `!important`、花括号配平、
-  自检脚本在无 `document` 环境下不抛异常）。
+| 测试 | 断言数 | 内容 |
+|---|---|---|
+| `check.mjs` | 117 | 垫片的存在性与语义；幂等、原生已存在时不覆盖；**C 组差分对拍**（`RegExp.escape` 675 样本 / base64+hex 各 162 / `URL.parse` 675 —— 能用原生对拍就别手写期望值，`RegExp.escape` 的转义规则就是被它抓出来重写的）；窄屏覆盖层（选择器齐全、布局属性全带 `!important`、花括号配平）；以及「Kotlin 原样字符串不得出现美元符」这类**编译期陷阱**的守卫 |
+| `settle-test.mjs` | 9 | §6.4 那个 boot 补丁：用**真实时钟**验证「已收敛就立刻返回」「竞态中会等」「永久卡住约 3 秒放手」，绝不挂死启动 |
+| `url-authority-test.mjs` | 15 | §6.2 那个 URL 补丁：**先把 `URL` 换成复刻旧内核缺口的假体**（否则只会得到「Node 本来就对」的假绿），复现故障 → 验证修复 → 再验证特殊 scheme 的双斜杠路径不被误伤、规范内核上零副作用 |
 
-当前 **99 项全部通过**。
+---
+
+## 十一、许可
+
+APTUIDSH 自身代码以 **MIT** 发布，见 [`LICENSE`](./LICENSE)。
+
+APK 内**打包**了若干第三方组件（proroot、dsh、Node.js、Ubuntu rootfs 等），
+各有自己的许可，其中 **proroot 有强制署名条款**。分发 APK 前请阅读
+[`third_party/OPEN-SOURCE.md`](./third_party/OPEN-SOURCE.md) 与
+[`third_party/proroot-LICENSE.txt`](./third_party/proroot-LICENSE.txt)；
+APP 内也在「环境控制台 → 开源许可与致谢」中同步署名。
