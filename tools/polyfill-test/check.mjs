@@ -178,6 +178,46 @@ ok('前置：RegExp.escape 确实不存在', typeof RegExp.escape === 'undefined
 // ------------------------------------------------------------ 跑垫片
 (0, eval)(JS);
 
+// ---------------------------------------------------- D. 窄屏布局覆盖层
+console.log('\n---------- D. 窄屏布局覆盖层（官方设置页 左右→上下）----------');
+{
+  const CSS = extract('CSS');
+  const LAYOUT_CHECK = extract('LAYOUT_CHECK');
+  console.log(`抽出覆盖样式 ${CSS.length} 字符 / 自检脚本 ${LAYOUT_CHECK.length} 字符`);
+
+  ok('CSS 里没有美元符号（Kotlin 原样字符串模板起始符）', !CSS.includes('$'));
+  ok('LAYOUT_CHECK 里没有美元符号', !LAYOUT_CHECK.includes('$'));
+
+  // 花括号配平（CSS 语法最低要求）
+  const open = (CSS.match(/\{/g) || []).length, close = (CSS.match(/\}/g) || []).length;
+  eq('CSS 花括号配平', open, close);
+
+  // 这几条是「设置页左右→上下」的关键，缺一不可
+  ok('覆盖了设置弹窗面板（flex-direction: column）',
+    /\[class\*="VOzbGW_panel"\][^}]*flex-direction:\s*column\s*!important/.test(CSS));
+  ok('覆盖了左侧竖排导航（改为横向排列）',
+    /\[class\*="VOzbGW_nav"\][^}]*flex-direction:\s*row\s*!important/.test(CSS));
+  ok('覆盖了导航列表（横向 + 自身滚动）',
+    /\[class\*="VOzbGW_navList"\][^}]*flex-direction:\s*row\s*!important/.test(CSS));
+  ok('覆盖了设置行（窄屏下标题在上、控件在下）',
+    /\[class\*="Pt1bsG_row"\][^}]*flex-direction:\s*column\s*!important/.test(CSS));
+
+  // 必须全是 !important：dsh 的插件样式是运行时 append 到 <head> 末尾的，
+  // 同为单类选择器时它排在我们后面、不加 !important 覆盖不住（这条是踩坑结论）
+  // 注意用 (?<![\w-]) 前缀：否则 `max-width:` 会被 `width` 误命中（自己踩过）
+  const PROP = /(?<![\w-])(flex-direction|width|align-items|padding|overflow[a-z-]*|flex|min-width|gap|height|white-space)\s*:/g;
+  const layoutProps = CSS.match(PROP) || [];
+  const importantProps = CSS.match(
+    /(?<![\w-])(flex-direction|width|align-items|padding|overflow[a-z-]*|flex|min-width|gap|height|white-space)\s*:[^;]*!important/g) || [];
+  eq('布局属性全部带 !important', layoutProps.length, importantProps.length);
+  ok('布局属性数量合理（>15）', layoutProps.length > 15, `实际 ${layoutProps.length}`);
+
+  // 自检脚本：无 document 环境下必须安静跳过（同一个文件也会进 worker 侧）
+  let layoutThrew = false;
+  try { (0, eval)(LAYOUT_CHECK); } catch (e) { layoutThrew = true; }
+  ok('布局自检脚本在无 document 环境下不抛异常', !layoutThrew);
+}
+
 console.log('\n---------- A. 存在性与语义 ----------');
 
 // Iterator
