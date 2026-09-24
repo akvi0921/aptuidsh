@@ -255,3 +255,65 @@ Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {   // ← 只有 fill
 `!CSS.includes('class*=')` 立刻报 FAIL —— 断言命中的是我自己的说明文字。
 **凡是「不许出现 X」的断言，必须先剥掉注释再匹配**（项目经验里早有这条，这是第二次踩）。
 现在 D 组所有断言一律基于 `CSS_CODE = CSS.replace(/\/\*[\s\S]*?\*\//g, '')`。
+
+---
+
+## 八、追加修复（1.3.3）：设置内容撑破弹窗、不能内部滚动
+
+### 8.1 现象
+
+导航与内容都正常了，但内容一多就**超出弹窗高度、被裁掉且滚不动**（截图里最后一个
+「开发者工具」只露出一半，下面的内容彻底看不到）。
+
+### 8.2 根因（两个叠在一起）
+
+**① flex 子项默认拒绝收缩 —— 这是滚动失效的直接原因。**
+
+官方 CSS 里内容列只有横向约束，没有纵向：
+
+```css
+.VOzbGW_content { display:flex; flex-direction:column; flex:1; min-width:0 }   /* 没有 min-height */
+.VOzbGW_options { flex:1; min-height:0; overflow-y:auto; padding:0 24px 24px }
+```
+
+`min-height` 的初始值是 `auto`，对 flex 子项而言等于「**不小于内容高度**」。
+于是 `content` 拒绝收缩到内容高度以下 → 它把弹窗撑破 → 弹窗的 `overflow:hidden` 把溢出部分一裁，
+`options` 永远拿不到受限高度，自然也就没有滚动条。
+
+这就是 flex 布局那条著名铁律：**想让 flex 子项内部滚动，必须显式给它（以及它的每一层祖先）`min-height:0`。**
+
+**② 弹窗高度用的是 `100vh`（布局视口），不是可见视口。**
+
+```css
+.VOzbGW_panel { height: min(800px, calc(100vh - 2 * max(24px, var(--dsh-frame-top-clearance, 24px)))) }
+```
+
+在 WebView 里布局视口与可见视口可能不等，弹窗因此可能比看得见的区域还高。
+
+### 8.3 修法（都在竖屏媒体查询里）
+
+```css
+[class~="VOzbGW_panel"] {
+  flex-direction: column !important;
+  height: min(800px, calc(100vh  - 24px)) !important;   /* 老内核兜底 */
+  max-height:           calc(100vh  - 24px) !important;
+  height: min(800px, calc(100dvh - 24px)) !important;   /* dvh 跟可见视口，优先 */
+  max-height:           calc(100dvh - 24px) !important;
+}
+[class~="VOzbGW_content"] { min-height: 0 !important; overflow: hidden !important; }
+[class~="VOzbGW_options"] { min-height: 0 !important; overflow-y: auto !important;
+                            -webkit-overflow-scrolling: touch !important; }
+```
+
+- 先写 `vh` 再写 `dvh`：不支持 `dvh` 的内核会把后一条当非法声明丢掉，自动沿用 `vh`；
+- `dvh`（Chrome 108+，本机 114 支持）跟的是**可见视口**，正好解决根因②。
+
+### 8.4 验收
+
+- `aapt2 dump badging` → `versionCode 21 / versionName 1.3.3`；
+- dex 核对（注意 `grep` 要加 `--`，否则开头的 `-` 会被当成选项）：
+  `class~="VOzbGW_content"` / `min-height: 0 !important` / `calc(100dvh - 24px)` /
+  `-webkit-overflow-scrolling` / `overflow-y: auto !important` 均在包内；
+- 垫片门禁 `bash tools/polyfill-test/run.sh` → **109 / 0**（D 组再增 4 条：
+  弹窗限高用 dvh、内容列 `min-height:0`、options 可纵向滚动，以及一条自证
+  「内容列规则里确实带上了 min-height」）。
