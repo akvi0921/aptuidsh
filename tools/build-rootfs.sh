@@ -156,10 +156,16 @@ if grep -rqs "sk-" rootfs/root/.dsh 2>/dev/null; then
   exit 1
 fi
 info "发行镜像卫生检查通过（无凭据 / 无测试会话）"
-# 只保留 linux-arm64 的预编译产物
-rm -rf "$NM"/node-pty/prebuilds/darwin-arm64 "$NM"/node-pty/prebuilds/darwin-x64 \
-       "$NM"/node-pty/prebuilds/win32-arm64 "$NM"/node-pty/prebuilds/win32-x64 \
-       "$NM"/node-pty/build
+# 只保留 linux-arm64 的预编译产物。
+# 注意：不要用「列举要删的目录」这种写法 —— 旧版只列了 darwin/win32，于是 dsh 0.2.0
+# 新增的 node-pty/prebuilds/linux-x64/pty.node 就漏了过去（实测残留 76KB x64 二进制）。
+# 改成「只保留 linux-arm64，其余全删」，将来多出任何平台也不会再漏。
+if [ -d "$NM"/node-pty/prebuilds ]; then
+  for d in "$NM"/node-pty/prebuilds/*/; do
+    case "$d" in *linux-arm64*) ;; *) rm -rf "$d" ;; esac
+  done
+fi
+rm -rf "$NM"/node-pty/build
 for d in "$NM"/@koromix/*/; do
   case "$d" in *linux-arm64*) ;; *) rm -rf "$d" ;; esac
 done

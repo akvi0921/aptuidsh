@@ -25,9 +25,9 @@ APTUIDSH 自身代码为本项目所有；APK 内**打包**了下列第三方组
 
 ## 2. DeepSeek Harness（dsh）—— 内置的本体
 
-- 来源：`npm @deepseek-ai/dsh@0.1.7-rc.1`（npm `next` 标签）
+- 来源：`npm @deepseek-ai/dsh@0.2.0-rc.2`（npm `latest` 与 `next` 同指该版本）
 - 许可：**MIT**
-- 打包内容：完整全局安装（含 157 个顶层依赖目录、`@deepseek-ai` 下 277 个官方包）
+- 打包内容：完整全局安装（含 177 个顶层依赖目录、`@deepseek-ai` 下 288 个官方包 + dsh 本体）
 
 ## 3. Node.js
 
@@ -44,11 +44,17 @@ APTUIDSH 自身代码为本项目所有；APK 内**打包**了下列第三方组
 
 dsh 的依赖树含大量第三方 npm 包，其中值得单独列出的是带**原生库**的几个：
 
-| 组件 | 许可 | 说明 |
-|---|---|---|
-| `sharp` + `@img/sharp-linux-arm64`（libvips） | Apache-2.0 | 图像处理，含 arm64 原生二进制 |
-| `node-pty` | MIT | 伪终端；镜像中已裁剪掉非 linux-arm64 的预编译产物 |
-| `koffi` + `@koromix/koffi-linux-arm64` | MIT | FFI，含 arm64 原生二进制 |
+| 组件 | 版本 | 许可 | 说明 |
+|---|---|---|---|
+| `sharp` + `@img/sharp-linux-arm64`（libvips） | 0.35.5 | Apache-2.0 | 图像处理，含 arm64 原生二进制 |
+| `node-pty` | 1.2.0-beta.15 | MIT | 伪终端；镜像中已裁剪掉**非 linux-arm64** 的预编译产物 |
+| `koffi` + `@koromix/koffi-linux-arm64` | 3.1.1 | MIT | FFI，含 arm64 原生二进制 |
+| `sherpa-onnx-linux-arm64` + `sherpa-onnx-node` | 1.13.8 | Apache-2.0 | **dsh 0.2.0 新增**：语音（ONNX 推理），含 arm64 原生二进制 |
+| `@deepseek-ai/node-addon-system-linux-arm64` | 0.1.2 | BSD-3-Clause | **dsh 0.2.0 新增**：系统信息原生插件 |
+| `node-addon-require-builtin-linux-arm64-gnu` | 0.1.6 | MIT | **dsh 0.2.0 新增**：内置模块加载原生插件 |
+
+> 上表版本为 dsh `0.2.0-rc.2` 实测；升级内置 dsh 后应重新核对（方法见
+> `tools/upgrade-diff/README.md` 里「作用域外的原生依赖」那一段）。
 
 其余为纯 JS 包，完整清单可在 guest 内查看：
 `/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/*/package.json`

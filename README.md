@@ -9,7 +9,7 @@ APTUIDSH 不依赖 Termux、不依赖 root、不依赖任何外部环境。APK �
 | 运行环境 | **proroot**（rootless Linux runtime，5 个 `.so`） | ~0.7 MB |
 | 操作系统 | **Ubuntu 24.04.5 LTS arm64** base rootfs（glibc） | ~203 MB（gzip 后） |
 | 运行时 | **Node.js 22.22.2** linux-arm64（装在 `/usr/local`） | — |
-| 本体 | **@deepseek-ai/dsh 0.1.7-rc.1**（npm 全局安装，含全部插件） | — |
+| 本体 | **@deepseek-ai/dsh 0.2.0-rc.2**（npm 全局安装，含全部插件） | — |
 | 前端 | **官方 dsh Web UI**（内嵌 WebView）—— 唯一的前端 | — |
 
 安装后首次启动，APP 把内置镜像解压到私有目录（约 794 MB、32700 个文件，实测 **24 秒**），
@@ -88,7 +88,7 @@ aptuidsh/
 `assets/rootfs.img`（约 203 MB）与 `jniLibs/*.so` **不入 Git**，由脚本生成：
 
 ```bash
-bash tools/build-rootfs.sh ~/aptuidsh-rootfs 0.1.7-rc.1
+bash tools/build-rootfs.sh ~/aptuidsh-rootfs 0.2.0-rc.2
 cp ~/aptuidsh-rootfs/dist/rootfs.img          app/src/main/assets/rootfs.img
 cp ~/aptuidsh-rootfs/dist/image-version.txt   app/src/main/assets/image-version.txt
 cp ~/aptuidsh-rootfs/proroot/*.so             app/src/main/jniLibs/arm64-v8a/
@@ -119,7 +119,7 @@ cp ~/aptuidsh-rootfs/proroot/*.so             app/src/main/jniLibs/arm64-v8a/
 rootfs/
 ├── bin, lib, sbin, usr/...                  Ubuntu 24.04.5 LTS arm64 base
 ├── usr/local/bin/{node,npm,npx,dsh}         Node 22.22.2（在默认 PATH 内）
-├── usr/local/lib/node_modules/@deepseek-ai/dsh    dsh 0.1.7-rc.1 本体 + 全部依赖
+├── usr/local/lib/node_modules/@deepseek-ai/dsh    dsh 0.2.0-rc.2 本体 + 全部依赖
 ├── root/.dsh/profiles/...                   预热好的 dsh profile
 ├── root/workspace                           默认工作区（/sdcard 不可用时回退）
 ├── etc/resolv.conf                          DNS 兜底（APP 每次启动用当前网络覆写）

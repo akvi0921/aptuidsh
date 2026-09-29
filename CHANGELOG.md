@@ -4,6 +4,46 @@
 
 ---
 
+## 1.5.0 —— 内置 dsh 升级到 0.2.0-rc.2（2026-09-25）
+
+内容：`@deepseek-ai/dsh 0.2.0-rc.2` + Ubuntu 24.04.5 arm64 + Node.js 22.22.2，
+前端仍只有官方 dsh Web UI。
+
+> 关于版本号：npm 上**不存在 2.0/2.x**，`latest` 与 `next` 都指向 `0.2.0-rc.2`；
+> 官方口径里的「2.0」即指该版本。
+
+### 变更
+
+- 内置 dsh `0.1.7-rc.1` → **`0.2.0-rc.2`**（541 个包；官方包 288 + 177 个顶层依赖）。
+- **客户端方法表 119 → 134：纯新增 15 个、零删除** —— 这一跳不含破坏性变更
+  （对比 0.1.5→0.1.7 曾删除 `subagents/list`）。新增集中在三个新命名空间：
+  `productAnalytics`（产品分析上报）、`schedule`（定时任务）、`userQuestions`。
+- 新增 4 个客户端插件：`dsh-client-product-analytics`、`dsh-client-shortcuts`、
+  `dsh-client-ui-shortcuts`、`dsh-client-ui-settings-session-log`（均 `platform: web`）。
+- WebView 兼容层**无需改动**：缺口清单与 0.1.7-rc.1 逐条一致（脚本 84→124 个），
+  `BOOT_SETTLE` 与 URL authority 两个补丁的挂点均未变化（详见 `WebPolyfill.kt` 顶部的体检记录）。
+- 窄屏布局覆盖层依赖的 dsh 类名前缀未失配，**设置页竖屏布局无需返工**。
+- 镜像体积：gzip 203,217,210 → **208,732,580** 字节；解压后 794M → 805M，文件数 32,700 → 33,059。
+
+### 你需要知道的新能力
+
+- **`productAnalytics`** —— 本版新增的数据上报能力（`productAnalytics/enabled|report|watchPolicy`）。
+  本项目**未改动其默认行为**；是否启用由 dsh 自身决定，介意的话请在 Web UI 设置里确认。
+- **`schedule`** —— 新增的定时任务能力，随 dsh 一起运行，APP 侧未做特殊处理。
+
+### 工程
+
+- 新增 **`tools/upgrade-diff/`**：把「升级会踩到的东西」（方法表 / 设置页 CSS 前缀 /
+  boot 内核标记 / `protocolOf` 原文 / 各包版本 / 原生包）抽成快照并机械 diff，
+  下次升级可直接复用。它会自动识别 **local（平铺）与 global（嵌套）** 两种安装布局 ——
+  指错了会得到「119 个方法全被删除」这类假警报。
+- `tools/build-rootfs.sh` 的跨平台二进制清理改为**白名单式**（只保留 `linux-arm64`）：
+  旧写法逐个列举要删的平台，于是 0.2.0 新增的 `node-pty/prebuilds/linux-x64/` 漏了过去。
+- 第三方许可文档补充了 0.2.0 新增的三个原生依赖（`sherpa-onnx`、`node-addon-system`、
+  `node-addon-require-builtin`）。
+
+---
+
 ## 1.4.0 —— 第一个开源正式版（2026-09-25）
 
 内容：`@deepseek-ai/dsh 0.1.7-rc.1` + Ubuntu 24.04.5 arm64 + Node.js 22.22.2，
@@ -47,6 +87,7 @@
 
 | 版本 | 主题 | 文档 |
 |---|---|---|
+| 1.5.0 | 内置 dsh 升级到 0.2.0-rc.2 | 本节 |
 | 1.3.9 | 修 `URL` authority（文件打不开的真根因） | `docs/WebView兼容-两个根因与取证-1.3.4至1.4.0.md` |
 | 1.3.7 | 修 boot 竞态 | 同上 |
 | 1.3.0 ~ 1.3.6 | 只留官方 Web UI、首页与环境控制台重做、设置页窄屏布局 | `docs/只留官方WebUI与首页重做-1.3.0.md` |

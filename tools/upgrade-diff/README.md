@@ -41,6 +41,14 @@ node tools/upgrade-diff/diff.mjs old.json new.json
 | `pluginIds` | 带 `lib/client.js` 的客户端插件清单 | 新增插件 = WebView 里多加载一份代码，要重跑垫片体检 |
 | `nativePkgs` | 含 `.node` 原生二进制的包 | 新增原生包要确认有 **linux-arm64** 产物（proroot 跑的是 arm64 glibc） |
 
+> **范围限制（诚实说明）**：`snapshot.mjs` 只遍历 `@deepseek-ai/*`，所以**看不到作用域外的原生依赖**
+> （如 `@img/sharp-linux-arm64`、`@koromix/koffi-linux-arm64`、`sherpa-onnx-linux-arm64`）。
+> 升级后请另外跑一次：
+> ```bash
+> find <node_modules> -name '*.node' | sed 's|.*/node_modules/||' | awk -F/ '{print $1"/"$2}' | sort -u
+> ```
+> 确认每个原生包都有 linux-arm64 产物（且**没有**混进 android/x64 变体，否则镜像会白白变大）。
+
 ## 配套（必须一起做，否则只比一半）
 
 **① 垫片缺口体检**——`snapshot` 只比对「本项目已知的挂点」，不负责发现**新的**缺口。
