@@ -12,6 +12,26 @@ package com.aptuidsh.kui
  * <p>这些 API 全都是**纯 JS 标准库 API**，可以用垫片完全覆盖，代价远小于换内核
  * （Android 也不允许应用自带 Chromium）。全部按「存在则跳过」补齐，新内核上零副作用。
  *
+ * <h3>0.2.0-rc.2 升级后重新体检的结论（2026-09-25）</h3>
+ * 同一套方法（BCD 导出「Chrome &gt; 114」全集 → 扫 dsh 真正下发的脚本 → 逐条回上下文判真伪）：
+ * <ul>
+ *   <li><b>缺口与 0.1.7-rc.1 逐条一致，没有任何新增</b> —— 脚本从 84 个（22.6 MB）增至
+ *       <b>124 个（28.9 MB）</b>，但两份体检报告的 A 段（基线内核里根本不存在的全局）与
+ *       B 段（晚于基线的成员）列表完全相同，故<b>本轮垫片无需改动</b>。</li>
+ *   <li>两处「疑似缺口」已逐条回到源码确认为<b>特性检测</b>，不需要补：
+ *       `Float16Array`(135) 全在 `typeof Float16Array !== "undefined"` 的
+ *       `isFloat16ArraySupported` 分支之后（不支持时退回 `Float32Array`）；
+ *       `Temporal`(144) 全在 `if ("Temporal" in globalThis)` 之内。</li>
+ *   <li><b>两个内嵌 dsh 语义的补丁仍然匹配</b>：boot 内核的
+ *       `did not activate` / `entries.start(` / 状态常量表 / `waiting for service`
+ *       全部保持原样（{@link #BOOT_SETTLE} 的挂点未变）；`dsh-client-resources` 的
+ *       `protocolOf()` 与 0.1.7-rc.1 <b>逐字相同</b>（URL authority 垫片仍然必要且匹配）。</li>
+ *   <li>窄屏布局覆盖层依赖的类名前缀也未失配：`width:188px` / `width:800px` /
+ *       `_row{…justify-content:space-between…}` 三条特征串仍在，前缀只增不减。</li>
+ *   <li>其余变化（新增 15 个客户端方法、4 个客户端插件、289 个官方包）不影响兼容层；
+ *       方法表是<b>纯新增、零删除</b>，不构成破坏性变更。</li>
+ * </ul>
+ *
  * <h3>0.1.7-rc.1 升级后重新体检的结论（2026-09-24）</h3>
  * 做法：从 MDN browser-compat-data 导出「Chrome &gt; 114 才加入」的全部 JS 内建/Web API，
  * 再对 dsh 真正发给浏览器的 **84 个脚本（22.6 MB）** 做穷举匹配，逐条回到源码上下文判定真伪。

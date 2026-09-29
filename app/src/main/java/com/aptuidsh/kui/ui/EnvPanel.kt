@@ -581,7 +581,7 @@ https://github.com/coderredlab/proroot
 须随副本附带许可声明并在应用内署名 proroot。
 
 【DeepSeek Harness (dsh)】MIT License
-@deepseek-ai/dsh 0.1.7-rc.1
+@deepseek-ai/dsh 0.2.0-rc.2
 
 【Node.js】MIT License
 v22.22.2 (linux-arm64)
