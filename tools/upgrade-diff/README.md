@@ -1,4 +1,4 @@
-# 内置 dsh 升级 · 对照工具
+# 内置 dsh 升级工具箱
 
 **用途**：把「升级内置 dsh 会踩到的东西」变成机器可比的清单，而不是靠回忆。
 每次升级 dsh 前后各取一份快照，`diff` 一次就知道**哪些本项目补丁/垫片会失配**。
@@ -11,6 +11,33 @@
 | `WebPolyfill` 的 URL authority 补丁 | `dsh-client-resources` 的 `protocolOf()` 用 `new URL(addr).hostname` 判 provider | 文件预览报「文件资源服务不可用」 |
 
 另外窄屏布局覆盖层依赖 dsh 的 **CSS Module 类名前缀**（失配不报错，只是悄悄恢复左右布局）。
+
+## 第 0 步：先判断**要不要**升级
+
+```bash
+node tools/upgrade-diff/check-update.mjs                 # 人类可读
+node tools/upgrade-diff/check-update.mjs --json          # 机器可读
+node tools/upgrade-diff/check-update.mjs --channel alpha # 换跟踪通道（默认 next）
+```
+
+一条命令交叉核对三条渠道并直接给结论：
+
+| 渠道 | 作用 |
+|---|---|
+| `registry.npmjs.org` | **权威**：我们安装的来源就是它；读 `dist-tags` |
+| `registry.npmmirror.com` | 国内镜像，用来发现**镜像滞后**（逐 tag 比，不能用 JSON 字符串比——键顺序不同会误报） |
+| GitHub `deepseek-ai/deepseek-harness` | 源码侧信号，能发现「**已发版但 npm 上还没有**」 |
+
+**退出码**（便于挂自动化）：`0` 已是最新 · `1` 跟踪通道上有更新 · `2` 有渠道查询失败（结论不完整，别据此决策）。
+
+判读要点：
+
+- **跟踪通道默认 `next`**。`alpha` 是**下一版的早期预览**，比 `rc` 更不稳；脚本会报告它，但不推荐跟。
+- 只有「跟踪通道上的版本 > 我们内置的版本」才算**该升级**。`latest`/`next` 没动而 `alpha` 往前跑了，属于正常状态，不用动作。
+- 提示「GitHub 上存在 npm 尚未发布的版本」时才值得多看一眼（可能官方发了版但还没推 npm）。
+- 我们内置的版本读自 `app/src/main/assets/image-version.txt`（构建时由 `build-rootfs.sh` 写入）；若构建工作目录里**实际安装**的版本与之不同，会额外打一行提示。
+
+---
 
 ## 用法
 
