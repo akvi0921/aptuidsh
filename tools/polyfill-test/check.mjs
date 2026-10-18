@@ -86,6 +86,16 @@ ok('该补丁必须有界：卡住就要放手，绝不能挂死启动',
 ok('该补丁暴露只读把手给自测（counts / settle）',
   SETTLE.includes('__aptuidshBootSettle') && SETTLE.includes('counts: counts, settle: settle'),
   '缺少 __aptuidshBootSettle 把手');
+// Kotlin 的块注释是**可嵌套**的：注释体里出现一个 `/*` 就会开启一个永不闭合的嵌套注释，
+// 编译期才报 `Syntax error: Unclosed comment`（实测踩过：KDoc 里写了 `pluginMarket/*`）。
+// 这里用「`/*` 与 `*/` 计数必须相等」做秒级体检，免得每次都等 3 分钟构建才发现打错字。
+ok('Kotlin 源文件的块注释平衡（防止注释体里误写 `/*` 开启嵌套注释）',
+  (() => {
+    const a = (kt.match(/\/\*/g) || []).length;
+    const b = (kt.match(/\*\//g) || []).length;
+    return a === b;
+  })(),
+  `/* 出现 ${(kt.match(/\/\*/g) || []).length} 次，*/ 出现 ${(kt.match(/\*\//g) || []).length} 次`);
 ok('垫片源码非空且看起来是 JS', JS.includes('Math.sumPrecise') && JS.includes('Iterator'));
 
 // -------------------------------------------- 先抓原生实现的行为做基准

@@ -28,7 +28,7 @@ package com.aptuidsh.kui
  * <p><b>⚠ 但这一版把客户端传输层整个换掉了</b>：客户端插件移除 `dsh-api-gateway` /
  * `dsh-client-connection` / `dsh-typert-registry`，新增 `dsh-api-remote-access`（RPC 传输层整体重构）；
  * 方法表 134 → 135，其中 **删除了 `terminal/follow|resize|write`、改为 `terminal/attach`**，
- * 并新增 `pluginMarket/*` 三个方法。`$mount` 仍在，但 `mountContribution` / `installNamespace`
+ * 并新增 `pluginMarket` 命名空间下的 3 个方法。`$mount` 仍在，但 `mountContribution` / `installNamespace`
  * 已从 `dsh-api-remotes` 移走 —— 也就是说 {@link #BOOT_SETTLE} 所修的竞态**成因形态变了**，
  * 静态对照只能确认"挂点还在"，**必须真机验证 boot 与终端页**。</p>
  *

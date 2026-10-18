@@ -53,15 +53,21 @@ esac
 # 进度可见性：Gradle 的进度条只在 rich 控制台出现，而非交互环境需要 pty 包装；
 # 且**绝不能接管道/重定向**（那会让输出不再流经 stdout，进度条就采集不到）。
 echo "==> $GRADLE $TASK --console=rich"
-TERM=xterm-256color script -q -f -c "$GRADLE $TASK --console=rich" /dev/null
+# 进度可见性 vs 退出码：`script -q -f -c … /dev/null` 会把 Gradle 的退出码**吃掉**
+# （本机实测多次：BUILD FAILED 它照样返回 0），所以「检查 $?」是安慰剂。
+# 正解：把 typescript 写到真实文件 —— 既保留 pty（进度条照常回显到 stdout），
+# 又能事后在日志里找 `BUILD SUCCESSFUL` 作为**唯一可信的成功判据**。
+BUILD_LOG="$(mktemp -t aptuidsh-build.XXXXXX.log)"
+TERM=xterm-256color script -q -f -c "$GRADLE $TASK --console=rich" "$BUILD_LOG"
 GRADLE_RC=$?
 
-# 必须显式检查退出码：`script` 包装后不会自动中断，
-# 曾经出现 BUILD FAILED 却照样打印「构建完成」、把上一版 APK 当新版交付的事故。
-if [ "$GRADLE_RC" -ne 0 ]; then
-  echo "[!] 构建失败：$GRADLE $TASK 退出码 $GRADLE_RC（上面 BUILD FAILED 的报错才是真相）"
-  exit "$GRADLE_RC"
+if [ "$GRADLE_RC" -ne 0 ] || ! grep -q "BUILD SUCCESSFUL" "$BUILD_LOG"; then
+  echo "[!] 构建失败（script 退出码 $GRADLE_RC；日志里没有 BUILD SUCCESSFUL）"
+  echo "    完整日志: $BUILD_LOG"
+  grep -nE "^e: |FAILED|BUILD FAILED|error:" "$BUILD_LOG" | tail -15 || true
+  exit 1
 fi
+rm -f "$BUILD_LOG"
 
 APK="app/build/outputs/apk/$VARIANT/app-$VARIANT.apk"
 [ -f "$APK" ] || { echo "[!] 未找到产物 $APK"; exit 1; }
