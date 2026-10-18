@@ -12,6 +12,26 @@ package com.aptuidsh.kui
  * <p>这些 API 全都是**纯 JS 标准库 API**，可以用垫片完全覆盖，代价远小于换内核
  * （Android 也不允许应用自带 Chromium）。全部按「存在则跳过」补齐，新内核上零副作用。
  *
+ * <h3>0.2.1-rc.2 升级后重新体检的结论（2026-10-18）</h3>
+ * 同一个工具箱（`tools/upgrade-diff/` 的快照 + 差异 + 垫片体检）跑出来的结论：
+ * <ul>
+ *   <li><b>垫片仍然无需改动</b>：缺口清单与 0.2.0-rc.2 逐条一致（脚本 124 → 更多，但 A/B 两段
+ *       的 API 集合完全相同）；唯一"新增"的 `Subscriber`(135) 经回源码确认只出现在**注释**里
+ *       （`Subscriber notification for the page controller…`）与 `notifySubscribers`，是假阳性。</li>
+ *   <li><b>设置页覆盖层无需返工</b>：三条特征串（`width:188px` / `width:800px` /
+ *       `_row{…justify-content:space-between…}`）仍在，CSS Module 前缀 36 → 36，**零增零减**。</li>
+ *   <li><b>{@link #BOOT_SETTLE} 的挂点仍在</b>：boot 内核的 `did not activate` /
+ *       `entries.start(` / 状态常量表 / `waiting for service` 全部保持。</li>
+ *   <li><b>URL authority 垫片仍然必要且匹配</b>：`dsh-client-resources` 的 `protocolOf()`
+ *       与 0.2.0-rc.2 <b>逐字相同</b>。</li>
+ * </ul>
+ * <p><b>⚠ 但这一版把客户端传输层整个换掉了</b>：客户端插件移除 `dsh-api-gateway` /
+ * `dsh-client-connection` / `dsh-typert-registry`，新增 `dsh-api-remote-access`（RPC 传输层整体重构）；
+ * 方法表 134 → 135，其中 **删除了 `terminal/follow|resize|write`、改为 `terminal/attach`**，
+ * 并新增 `pluginMarket/*` 三个方法。`$mount` 仍在，但 `mountContribution` / `installNamespace`
+ * 已从 `dsh-api-remotes` 移走 —— 也就是说 {@link #BOOT_SETTLE} 所修的竞态**成因形态变了**，
+ * 静态对照只能确认"挂点还在"，**必须真机验证 boot 与终端页**。</p>
+ *
  * <h3>0.2.0-rc.2 升级后重新体检的结论（2026-09-25）</h3>
  * 同一套方法（BCD 导出「Chrome &gt; 114」全集 → 扫 dsh 真正下发的脚本 → 逐条回上下文判真伪）：
  * <ul>
