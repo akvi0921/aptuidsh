@@ -76,11 +76,18 @@ try {
 
 // ---- 3. 客户端方法表（协议层破坏性变更的判据）------------------------------
 const remotes = read(path.join(SCAN, 'dsh-api-remotes', 'lib', 'client.js'));
-// 注意：descriptor 的 id 前缀**不都是** dsh-api-*（还有 dsh-plugin-manager /
-// dsh-cordis-host-runner / dsh-goal / dsh-llm / dsh-message-feedback 等），
-// 只按 dsh-api-* 抽会漏掉一整类 —— 那样破坏性变更会被隐藏。这里抽全部 id。
-const methods = uniq((remotes?.match(/\bid: "([^"#]+#[^"]+)"/g) ?? [])
-  .map((s) => s.slice(s.indexOf('"') + 1, -1)));
+// descriptor 的**格式在 0.2.1 里被重构过**，两种都要认，否则会得到「方法表=0」的假警报：
+//   0.2.0 及更早：每个描述符是一个对象  { id: "<pkg>#<ns>/<method>", namespace, method, … }
+//   0.2.1 起    ：改成键值映射            { "<ns>/<method>": { … }, … }
+// 两种格式实测互斥、零串扰（0.2.0 只命中旧式 134 个 / 0.2.1 只命中新式 135 个），
+// 所以并集是安全的。统一归一成 `ns/method`，跨版本才可比。
+// 另外注意：旧式 id 的前缀**不都是** dsh-api-*（还有 dsh-plugin-manager /
+// dsh-cordis-host-runner / dsh-goal / dsh-llm 等），只按 dsh-api-* 抽会漏掉一整类。
+const methods = uniq([
+  ...(remotes?.matchAll(/\bid:\s*"([^"#]+)#([^"]+)"/g) ?? []),
+].map((m) => m[2]).concat(
+  [...(remotes?.matchAll(/"([A-Za-z][\w]*\/[A-Za-z][\w]*)"\s*:\s*\{/g) ?? [])].map((m) => m[1]),
+));
 
 // ---- 4. 设置页 CSS Module 前缀 + 三条特征串 --------------------------------
 const settings = read(path.join(SCAN, 'dsh-client-ui-settings-general', 'lib', 'client.js'));
@@ -150,7 +157,7 @@ const out = {
   versions,
   methods,
   methodCount: methods.length,
-  methodNamespaces: uniq(methods.map((m) => m.split('#')[1].split('/')[0])),
+  methodNamespaces: uniq(methods.map((m) => String(m).split('/')[0])),
   cssPrefixes,
   cssFeatures,
   bootKernel,
